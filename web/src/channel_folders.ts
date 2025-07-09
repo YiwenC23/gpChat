@@ -50,3 +50,9 @@ export function get_channel_folder_by_id(folder_id: number): ChannelFolder {
     assert(folder !== undefined);
     return folder;
 }
+
+export function get_channel_folder_name_from_id(folder_id: number): string {
+    const channel_folder = channel_folder_by_id_dict.get(folder_id);
+    assert(channel_folder !== undefined);
+    return channel_folder.name;
+}

@@ -1049,6 +1049,10 @@ export function num_unread_mentions_in_dms(): number {
     return unread_mention_dms.size;
 }
 
+export function num_unread_mentions_in_topics(): number {
+    return unread_mention_topics.size;
+}
+
 export function num_unread_for_user_ids_string(user_ids_string: string): number {
     return unread_direct_message_counter.num_unread(user_ids_string);
 }

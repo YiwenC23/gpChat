@@ -38,7 +38,8 @@ ZULIP_ADMINISTRATOR = "zulip-admin@example.com"
 ##
 ## If you need to access the server on a specific port, you should set
 ## EXTERNAL_HOST to e.g. zulip.example.com:1234 here.
-EXTERNAL_HOST = "zulip.example.com"
+#?EXTERNAL_HOST = "zulip.example.com"
+EXTERNAL_HOST = "18.116.214.67.nip.io"
 
 ## Alternative hostnames.  A comma-separated list of strings
 ## representing the host/domain names that your users can enter in
@@ -166,8 +167,8 @@ AUTHENTICATION_BACKENDS: tuple[str, ...] = (
 ## Zulip supports retrieving information about users via LDAP, and
 ## optionally using LDAP as an authentication mechanism.
 
-import ldap
-from django_auth_ldap.config import GroupOfNamesType, LDAPGroupQuery, LDAPSearch  # noqa: F401
+#? import ldap
+#? from django_auth_ldap.config import GroupOfNamesType, LDAPGroupQuery, LDAPSearch  # noqa: F401
 
 ## Connecting to the LDAP server.
 ##
@@ -200,9 +201,9 @@ from django_auth_ldap.config import GroupOfNamesType, LDAPGroupQuery, LDAPSearch
 ## name they type into the Zulip login form.
 ##
 ## For more details and alternatives, see the documentation linked above.
-AUTH_LDAP_USER_SEARCH = LDAPSearch(
-    "ou=users,dc=example,dc=com", ldap.SCOPE_SUBTREE, "(uid=%(user)s)"
-)
+#? AUTH_LDAP_USER_SEARCH = LDAPSearch(
+#?     "ou=users,dc=example,dc=com", ldap.SCOPE_SUBTREE, "(uid=%(user)s)"
+#? )
 
 ## Configuration to look up a user's LDAP data given their email address
 ## (for Zulip reverse mapping).  If users log in as e.g. "sam" when
@@ -232,19 +233,19 @@ AUTH_LDAP_USER_SEARCH = LDAPSearch(
 ## The format is `zulip_name: ldap_name`; each entry maps a Zulip
 ## concept (on the left) to the LDAP attribute name (on the right) your
 ## LDAP database uses for the same concept.
-AUTH_LDAP_USER_ATTR_MAP = {
+#? AUTH_LDAP_USER_ATTR_MAP = {
     ## full_name is required; common values include "cn" or "displayName".
     ## If names are encoded in your LDAP directory as first and last
     ## name, you can instead specify first_name and last_name, and
     ## Zulip will combine those to construct a full_name automatically.
-    "full_name": "cn",
+    #? "full_name": "cn",
     # "first_name": "fn",
     # "last_name": "ln",
     #
     ## A stable unique identifier for a user allows Zulip to
     ## automatically handle email address changes.
     ## See https://zulip.readthedocs.io/en/latest/production/authentication-methods.html#identifying-user-accounts-via-a-unique-ldap-attribute
-    "unique_account_id": "dn",
+    #? "unique_account_id": "dn",
     ##
     ## Profile pictures can be pulled from the LDAP "thumbnailPhoto"/"jpegPhoto" field.
     # "avatar": "thumbnailPhoto",
@@ -259,7 +260,7 @@ AUTH_LDAP_USER_ATTR_MAP = {
     ## Restrict access to organizations using an LDAP attribute.
     ## See https://zulip.readthedocs.io/en/latest/production/authentication-methods.html#restricting-ldap-user-access-to-specific-organizations
     # "org_membership": "department",
-}
+#? }
 
 ## Whether to automatically deactivate users not found in LDAP. If LDAP
 ## is the only authentication method, then this setting defaults to
@@ -380,30 +381,30 @@ AUTH_LDAP_USER_ATTR_MAP = {
 ##     https://zulip.readthedocs.io/en/latest/production/authentication-methods.html#openid-connect
 ##
 
-SOCIAL_AUTH_OIDC_ENABLED_IDPS: dict[str, Any] = {
-    ## This field (example: "idp_name") may appear in URLs during
-    ## authentication, but is otherwise not user-visible.
-    "idp_name": {
-        ## The base path to the provider's OIDC API. Zulip fetches the
-        ## IdP's configuration from the discovery endpoint, which will be
-        ## "{oidc_url}/.well-known/openid-configuration".
-        "oidc_url": "https://example.com/api/openid",
-        ## The display name, used for "Log in with <display name>" buttons.
-        "display_name": "Example",
-        ## Optional: URL of an icon to decorate "Log in with <display name>" buttons.
-        "display_icon": None,
-        ## The client_id and secret provided by your OIDC IdP. To keep
-        ## settings.py free of secrets, the get_secret call below
-        ## reads the secret with the specified name from zulip-secrets.conf.
-        "client_id": "<your client id>",
-        "secret": get_secret("social_auth_oidc_secret"),
-        ## Determines whether "Log in with OIDC" will automatically
-        ## register a new account if one does not already exist. By
-        ## default, Zulip asks the user whether they want to create an
-        ## account or try to log in again using another method.
-        # "auto_signup": False,
-    }
-}
+#? SOCIAL_AUTH_OIDC_ENABLED_IDPS: dict[str, Any] = {
+#?     ## This field (example: "idp_name") may appear in URLs during
+#?     ## authentication, but is otherwise not user-visible.
+#?     "idp_name": {
+#?         ## The base path to the provider's OIDC API. Zulip fetches the
+#?         ## IdP's configuration from the discovery endpoint, which will be
+#?         ## "{oidc_url}/.well-known/openid-configuration".
+#?         "oidc_url": "https://example.com/api/openid",
+#?         ## The display name, used for "Log in with <display name>" buttons.
+#?         "display_name": "Example",
+#?         ## Optional: URL of an icon to decorate "Log in with <display name>" buttons.
+#?         "display_icon": None,
+#?         ## The client_id and secret provided by your OIDC IdP. To keep
+#?         ## settings.py free of secrets, the get_secret call below
+#?         ## reads the secret with the specified name from zulip-secrets.conf.
+#?         "client_id": "<your client id>",
+#?         "secret": get_secret("social_auth_oidc_secret"),
+#?         ## Determines whether "Log in with OIDC" will automatically
+#?         ## register a new account if one does not already exist. By
+#?         ## default, Zulip asks the user whether they want to create an
+#?         ## account or try to log in again using another method.
+#?         # "auto_signup": False,
+#?     }
+#? }
 
 ## For documentation on this setting, see the relevant part of
 ## https://zulip.readthedocs.io/en/latest/production/authentication-methods.html#openid-connect
@@ -419,99 +420,99 @@ SOCIAL_AUTH_OIDC_ENABLED_IDPS: dict[str, Any] = {
 ##     https://zulip.readthedocs.io/en/latest/production/authentication-methods.html#saml
 ##
 ## You will need to modify these SAML settings:
-SOCIAL_AUTH_SAML_ORG_INFO = {
-    "en-US": {
-        "displayname": "Example, Inc. Zulip",
-        "name": "zulip",
-        "url": "{}{}".format("https://", EXTERNAL_HOST),
-    },
-}
-SOCIAL_AUTH_SAML_ENABLED_IDPS: dict[str, Any] = {
-    ## The fields are explained in detail here:
-    ##     https://python-social-auth.readthedocs.io/en/latest/backends/saml.html
-    "idp_name": {
-        ## Configure entity_id and url according to information provided to you by your IdP:
-        "entity_id": "https://idp.testshib.org/idp/shibboleth",
-        "url": "https://idp.testshib.org/idp/profile/SAML2/Redirect/SSO",
-        ##
-        ## The part below corresponds to what's likely referred to as something like
-        ## "Attribute Statements" (with Okta as your IdP) or "Attribute Mapping" (with Google Workspace).
-        ## The names on the right side need to correspond to the names under which
-        ## the IdP will send the user attributes. With these defaults, it's expected
-        ## that the user's email will be sent with the "email" attribute name,
-        ## the first name and the last name with the "first_name", "last_name" attribute names.
-        "attr_user_permanent_id": "email",
-        "attr_first_name": "first_name",
-        "attr_last_name": "last_name",
-        "attr_username": "email",
-        "attr_email": "email",
-        ## List of additional attributes to fetch from the SAMLResponse.
-        ## These attributes will be available for synchronizing user profile fields.
-        ## in SOCIAL_AUTH_SYNC_ATTRS_DICT.
-        # "extra_attrs": ["title", "mobilePhone", "zulip_role"],
-        ##
-        ## The "x509cert" attribute is automatically read from
-        ## /etc/zulip/saml/idps/{idp_name}.crt; don't specify it here.
-        ##
-        ## Optionally, you can edit display_name and display_icon
-        ## settings below to change the name and icon that will show on
-        ## the login button.
-        "display_name": "SAML",
-        ##
-        ## Path to a square image file containing a logo to appear at
-        ## the left end of the login/register buttons for this IDP.
-        ## The default of None results in a text-only button.
-        # "display_icon": "/path/to/icon.png",
-        ##
-        ## If you want this IdP to only be enabled for authentication
-        ## to certain subdomains, uncomment and edit the setting below.
-        # "limit_to_subdomains": ["subdomain1", "subdomain2"],
-        ##
-        ## You can also limit subdomains by setting "attr_org_membership"
-        ## to be a SAML attribute containing the allowed subdomains for a user.
-        # "attr_org_membership": "member",
-        ##
-        ## Determines whether "Log in with SAML" will automatically
-        ## register a new account if one does not already exist. By
-        ## default, Zulip asks the user whether they want to create an
-        ## account or try to log in again using another method.
-        # "auto_signup": False,
-        ## Determines whether Service Provider initiated SAML Single Logout should be enabled.
-        ## Note that IdP-initiated Single Logout must be configured before enabling this.
-        # "sp_initiated_logout_enabled": False,
-    },
-}
+#? SOCIAL_AUTH_SAML_ORG_INFO = {
+#?     "en-US": {
+#?         "displayname": "Example, Inc. Zulip",
+#?         "name": "zulip",
+#?         "url": "{}{}".format("https://", EXTERNAL_HOST),
+#?     },
+#? }
+#? SOCIAL_AUTH_SAML_ENABLED_IDPS: dict[str, Any] = {
+#?     ## The fields are explained in detail here:
+#?     ##     https://python-social-auth.readthedocs.io/en/latest/backends/saml.html
+#?     "idp_name": {
+#?         ## Configure entity_id and url according to information provided to you by your IdP:
+#?         "entity_id": "https://idp.testshib.org/idp/shibboleth",
+#?         "url": "https://idp.testshib.org/idp/profile/SAML2/Redirect/SSO",
+#?         ##
+#?         ## The part below corresponds to what's likely referred to as something like
+#?         ## "Attribute Statements" (with Okta as your IdP) or "Attribute Mapping" (with Google Workspace).
+#?         ## The names on the right side need to correspond to the names under which
+#?         ## the IdP will send the user attributes. With these defaults, it's expected
+#?         ## that the user's email will be sent with the "email" attribute name,
+#?         ## the first name and the last name with the "first_name", "last_name" attribute names.
+#?         "attr_user_permanent_id": "email",
+#?         "attr_first_name": "first_name",
+#?         "attr_last_name": "last_name",
+#?         "attr_username": "email",
+#?         "attr_email": "email",
+#?         ## List of additional attributes to fetch from the SAMLResponse.
+#?         ## These attributes will be available for synchronizing user profile fields.
+#?         ## in SOCIAL_AUTH_SYNC_ATTRS_DICT.
+#?         # "extra_attrs": ["title", "mobilePhone", "zulip_role"],
+#?         ##
+#?         ## The "x509cert" attribute is automatically read from
+#?         ## /etc/zulip/saml/idps/{idp_name}.crt; don't specify it here.
+#?         ##
+#?         ## Optionally, you can edit display_name and display_icon
+#?         ## settings below to change the name and icon that will show on
+#?         ## the login button.
+#?         "display_name": "SAML",
+#?         ##
+#?         ## Path to a square image file containing a logo to appear at
+#?         ## the left end of the login/register buttons for this IDP.
+#?         ## The default of None results in a text-only button.
+#?         # "display_icon": "/path/to/icon.png",
+#?         ##
+#?         ## If you want this IdP to only be enabled for authentication
+#?         ## to certain subdomains, uncomment and edit the setting below.
+#?         # "limit_to_subdomains": ["subdomain1", "subdomain2"],
+#?         ##
+#?         ## You can also limit subdomains by setting "attr_org_membership"
+#?         ## to be a SAML attribute containing the allowed subdomains for a user.
+#?         # "attr_org_membership": "member",
+#?         ##
+#?         ## Determines whether "Log in with SAML" will automatically
+#?         ## register a new account if one does not already exist. By
+#?         ## default, Zulip asks the user whether they want to create an
+#?         ## account or try to log in again using another method.
+#?         # "auto_signup": False,
+#?         ## Determines whether Service Provider initiated SAML Single Logout should be enabled.
+#?         ## Note that IdP-initiated Single Logout must be configured before enabling this.
+#?         # "sp_initiated_logout_enabled": False,
+#?     },
+#? }
 
-# More complete documentation of the configurable security settings
-# are available in the "security" part of https://github.com/onelogin/python3-saml#settings.
-SOCIAL_AUTH_SAML_SECURITY_CONFIG: dict[str, Any] = {
-    ## If you've set up the optional private and public server keys,
-    ## set this to True to enable signing of SAMLRequests using the
-    ## private key.
-    "authnRequestsSigned": False,
-    ## If you'd like the Zulip server to request that the IdP limit user identity
-    ## verification to a specific set of authentication contexts, you can do this
-    ## by changing the requestedAuthnContext parameter to a list of specific
-    ## Authentication Context Classes that you want to include in the AuthnContext. E.g.:
-    ##
-    # "requestedAuthnContext": ["urn:oasis:names:tc:SAML:2.0:ac:classes:PasswordProtectedTransport",
-    #                           "urn:oasis:names:tc:SAML:2.0:ac:classes:X509"],
-    ##
-    ## For details on this, see the aforementioned python3-saml documentation
-    ## and https://docs.oasis-open.org/security/saml/v2.0/saml-authn-context-2.0-os.pdf
-    "requestedAuthnContext": False,
-}
+#? # More complete documentation of the configurable security settings
+#? # are available in the "security" part of https://github.com/onelogin/python3-saml#settings.
+#? SOCIAL_AUTH_SAML_SECURITY_CONFIG: dict[str, Any] = {
+#?     ## If you've set up the optional private and public server keys,
+#?     ## set this to True to enable signing of SAMLRequests using the
+#?     ## private key.
+#?     "authnRequestsSigned": False,
+#?     ## If you'd like the Zulip server to request that the IdP limit user identity
+#?     ## verification to a specific set of authentication contexts, you can do this
+#?     ## by changing the requestedAuthnContext parameter to a list of specific
+#?     ## Authentication Context Classes that you want to include in the AuthnContext. E.g.:
+#?     ##
+#?     # "requestedAuthnContext": ["urn:oasis:names:tc:SAML:2.0:ac:classes:PasswordProtectedTransport",
+#?     #                           "urn:oasis:names:tc:SAML:2.0:ac:classes:X509"],
+#?     ##
+#?     ## For details on this, see the aforementioned python3-saml documentation
+#?     ## and https://docs.oasis-open.org/security/saml/v2.0/saml-authn-context-2.0-os.pdf
+#?     "requestedAuthnContext": False,
+#? }
 
-## These SAML settings you likely won't need to modify.
-SOCIAL_AUTH_SAML_SP_ENTITY_ID = "https://" + EXTERNAL_HOST
-SOCIAL_AUTH_SAML_TECHNICAL_CONTACT = {
-    "givenName": "Technical team",
-    "emailAddress": ZULIP_ADMINISTRATOR,
-}
-SOCIAL_AUTH_SAML_SUPPORT_CONTACT = {
-    "givenName": "Support team",
-    "emailAddress": ZULIP_ADMINISTRATOR,
-}
+#? ## These SAML settings you likely won't need to modify.
+#? SOCIAL_AUTH_SAML_SP_ENTITY_ID = "https://" + EXTERNAL_HOST
+#? SOCIAL_AUTH_SAML_TECHNICAL_CONTACT = {
+#?     "givenName": "Technical team",
+#?     "emailAddress": ZULIP_ADMINISTRATOR,
+#? }
+#? SOCIAL_AUTH_SAML_SUPPORT_CONTACT = {
+#?     "givenName": "Support team",
+#?     "emailAddress": ZULIP_ADMINISTRATOR,
+#? }
 
 ## Note: Any additional SAML attributes that'll be used here must be
 ## listed in the "extra_attrs" field in the SOCIAL_AUTH_SAML_ENABLED_IDPS
@@ -856,7 +857,7 @@ LOCAL_UPLOADS_DIR = "/home/zulip/uploads"
 ## The default CAMO_URI of "/external_content/" is served by the camo
 ## setup in the default Zulip nginx configuration.  Setting CAMO_URI
 ## to "" will disable the Camo integration.
-CAMO_URI = "/external_content/"
+#? CAMO_URI = "/external_content/"
 
 ## Controls various features explaining Zulip to new users. Disabling
 ## this is only recommended for installations that are using a limited

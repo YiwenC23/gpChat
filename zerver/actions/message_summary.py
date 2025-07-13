@@ -63,7 +63,72 @@ def format_zulip_messages_for_model(zulip_messages: list[dict[str, Any]]) -> str
         {"sender": message["sender_full_name"], "content": message["content"]}
         for message in zulip_messages
     ]
-    return orjson.dumps(zulip_messages_list).decode()
+    return orjson.dumps(zulip_messages_list, option=orjson.OPT_INDENT_2).decode()
+
+
+def zulip_messages(
+    user_profile: UserProfile,
+    narrow: list[NarrowParameter] | None,
+) -> list[dict[str, Any]] | None:
+
+    narrow = clean_narrow_for_message_fetch(narrow, user_profile.realm, user_profile)
+    query_info = fetch_messages(
+        narrow=narrow,
+        user_profile=user_profile,
+        realm=user_profile.realm,
+        is_web_public_query=False,
+        anchor=LARGER_THAN_MAX_MESSAGE_ID,
+        include_anchor=True,
+        num_before=MAX_MESSAGES_SUMMARIZED,
+        num_after=0,
+    )
+
+    if len(query_info.rows) == 0:  # nocoverage
+        return None
+
+    result_message_ids: list[int] = []
+    user_message_flags: dict[int, list[str]] = {}
+    for row in query_info.rows:
+        message_id = row[0]
+        result_message_ids.append(message_id)
+        # We skip populating flags, since they would be ignored below anyway.
+        user_message_flags[message_id] = []
+
+    message_list = messages_for_ids(
+        message_ids=result_message_ids,
+        user_message_flags=user_message_flags,
+        search_fields={},
+        # We currently prefer the plain-text content of messages to
+        apply_markdown=False,
+        # Avoid wasting resources computing gravatars.
+        client_gravatar=True,
+        allow_empty_topic_name=False,
+        # Avoid fetching edit history, which won't be passed to the model.
+        message_edit_history_visibility_policy=MessageEditHistoryVisibilityPolicyEnum.none.value,
+        user_profile=user_profile,
+        realm=user_profile.realm,
+    )
+
+    return message_list
+
+def format_zulip_messages(messages: list[dict[str, Any]]) -> str:
+    intro = "The following is a chat conversation in the Zulip team chat app."
+    topic: str | None = None
+    channel: str | None = None
+    if narrow and len(narrow) == 2:
+        for term in narrow:
+            assert not term.negated
+            if term.operator == "channel":
+                channel = term.operand
+            if term.operator == "topic":
+                topic = term.operand
+    if channel:
+        intro += f" channel: {channel}"
+    if topic:
+        intro += f", topic: {topic}"
+
+    formatted_conversation = format_zulip_messages_for_model(messages)
+    return formatted_conversation
 
 
 def make_message(content: str, role: str = "user") -> dict[str, str]:
@@ -212,3 +277,19 @@ def do_summarize_narrow(
     # content. Requires a prompt that supports it.
     rendered_summary = markdown_convert(summary, message_realm=user_profile.realm).rendered_content
     return rendered_summary
+
+
+if __name__ == "__main__":
+    import pprint as pp
+
+    user_profile = UserProfile.objects.get(email="user11@zulipdev.com")
+    narrow = [
+        NarrowParameter(operator="channel", operand="devel", negated=False),
+    ]
+    msgs = zulip_messages(user_profile, narrow)
+    pp.pprint(msgs, sort_dicts=False)
+
+    print("\n", "=" * 100, "\n")
+
+    formatted_conversation = format_zulip_messages(msgs)
+    print(formatted_conversation)

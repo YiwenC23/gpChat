@@ -214,6 +214,47 @@ REPO_STOPWORDS_PATH = os.path.join(
 )
 
 
+def install_ollama() -> None:
+    """Install Ollama AI runtime and download base models"""
+    print("Installing Ollama AI runtime...")
+    
+    # Check if Ollama is already installed
+    try:
+        run(["which", "ollama"])
+        print("Ollama already installed, checking version...")
+        run(["ollama", "--version"])
+    except subprocess.CalledProcessError:
+        print("Installing Ollama...")
+        # Install Ollama using official script
+        run(["bash", "-c", "curl -fsSL https://ollama.ai/install.sh | sh"])
+    
+    # Ensure Ollama service is running
+    try:
+        # Start Ollama in background if not running
+        subprocess.Popen(["ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # Give it a moment to start
+        import time
+        time.sleep(3)
+    except Exception:
+        print("Ollama may already be running, continuing...")
+    
+    # Download required models
+    print("Downloading AI models (this may take several minutes)...")
+    models_to_download = [
+        "llama3.1:8b",       # Main language model
+        "nomic-embed-text:v1.5",  # Embedding model
+    ]
+    
+    for model in models_to_download:
+        try:
+            print(f"Downloading {model}...")
+            run(["ollama", "pull", model])
+            print(f"Successfully downloaded {model}")
+        except subprocess.CalledProcessError as e:
+            print(f"Warning: Failed to download {model}: {e}")
+            print("You can download it later with: ollama pull " + model)
+
+
 def install_system_deps() -> None:
     # By doing list -> set -> list conversion, we remove duplicates.
     deps_to_install = sorted(set(SYSTEM_DEPENDENCIES))
@@ -231,6 +272,9 @@ def install_system_deps() -> None:
         run_as_root(["./scripts/lib/build-groonga"])
     if BUILD_PGROONGA_FROM_SOURCE:
         run_as_root(["./scripts/lib/build-pgroonga"])
+    
+    # Install Ollama AI runtime
+    install_ollama()
 
 
 def install_apt_deps(deps_to_install: list[str]) -> None:

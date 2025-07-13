@@ -204,6 +204,9 @@ prod = [
 
   # For E2EE of push notifications
   "pynacl",
+
+  # For LLMs
+  "ollama",
 ]
 docs = [
   # Needed to build RTD docs

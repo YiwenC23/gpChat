@@ -52,15 +52,15 @@ ALLOWED_HOSTS = ["*"]
 # Uncomment extra backends if you want to test with them.  Note that
 # for Google and GitHub auth you'll need to do some pre-setup.
 AUTHENTICATION_BACKENDS: tuple[str, ...] = (
-    # "zproject.backends.DevAuthBackend",
+    "zproject.backends.DevAuthBackend",
     "zproject.backends.EmailAuthBackend",
-    # "zproject.backends.GitHubAuthBackend",
-    # "zproject.backends.GoogleAuthBackend",
-    # "zproject.backends.SAMLAuthBackend",
+    "zproject.backends.GitHubAuthBackend",
+    "zproject.backends.GoogleAuthBackend",
+    "zproject.backends.SAMLAuthBackend",
     # 'zproject.backends.AzureADAuthBackend',
-    # "zproject.backends.GitLabAuthBackend",
-    # "zproject.backends.AppleAuthBackend",
-    # "zproject.backends.GenericOpenIdConnectBackend",
+    "zproject.backends.GitLabAuthBackend",
+    "zproject.backends.AppleAuthBackend",
+    "zproject.backends.GenericOpenIdConnectBackend",
 )
 
 EXTERNAL_URI_SCHEME = "http://"
@@ -71,24 +71,20 @@ if os.getenv("BEHIND_HTTPS_PROXY"):
     # Trust requests from this host (required due to Nginx proxy)
     CSRF_TRUSTED_ORIGINS = [EXTERNAL_URI_SCHEME + EXTERNAL_HOST]
 
-#? EMAIL_GATEWAY_PATTERN = "%s@" + EXTERNAL_HOST_WITHOUT_PORT
-#? NOTIFICATION_BOT = "notification-bot@zulip.com"
-#? EMAIL_GATEWAY_BOT = "emailgateway@zulip.com"
-#? PHYSICAL_ADDRESS = "Zulip Headquarters, 123 Octo Stream, South Pacific Ocean"
-#? STAFF_SUBDOMAIN = "zulip"
-#? EXTRA_INSTALLED_APPS = ["zilencer", "analytics", "corporate"]
+EMAIL_GATEWAY_PATTERN = "%s@" + EXTERNAL_HOST_WITHOUT_PORT
+NOTIFICATION_BOT = "notification-bot@zulip.com"
+EMAIL_GATEWAY_BOT = "emailgateway@zulip.com"
+PHYSICAL_ADDRESS = "Zulip Headquarters, 123 Octo Stream, South Pacific Ocean"
+STAFF_SUBDOMAIN = "zulip"
+EXTRA_INSTALLED_APPS = ["zilencer", "analytics", "corporate"]
 # Disable Camo in development
 CAMO_URI = ""
+KATEX_SERVER = False
 
 TORNADO_PORTS = [9993]
 
-# Whether anyone can create a new organization on the Zulip server.
 OPEN_REALM_CREATION = True
-
-# Whether it's possible to create web-public streams on this server.
-WEB_PUBLIC_STREAMS_ENABLED = False
-
-# The minimum age for a user to be able to invite other users to the organization.
+WEB_PUBLIC_STREAMS_ENABLED = True
 INVITES_MIN_USER_AGE_DAYS = 0
 
 # Redirect to /devlogin/ by default in dev mode
@@ -100,7 +96,7 @@ POLICIES_DIRECTORY = "corporate/policies"
 TERMS_OF_SERVICE_VERSION = "1.0"
 TERMS_OF_SERVICE_MESSAGE: str | None = "Description of changes to the ToS!"
 
-EMBEDDED_BOTS_ENABLED = False
+EMBEDDED_BOTS_ENABLED = True
 
 SYSTEM_ONLY_REALMS: set[str] = set()
 USING_PGROONGA = True
@@ -110,12 +106,12 @@ POST_MIGRATION_CACHE_FLUSHING = True
 # If a sandbox APNs key or cert is provided, use it.
 # To create such a key or cert, see instructions at:
 #   https://github.com/zulip/zulip-mobile/blob/main/docs/howto/push-notifications.md#ios
-# _candidate_apns_token_key_file = "zproject/apns-dev-key.p8"
-# _candidate_apns_cert_file = "zproject/apns-dev.pem"
-# if os.path.isfile(_candidate_apns_token_key_file):
-#     APNS_TOKEN_KEY_FILE = _candidate_apns_token_key_file
-# elif os.path.isfile(_candidate_apns_cert_file):
-#     APNS_CERT_FILE = _candidate_apns_cert_file
+_candidate_apns_token_key_file = "zproject/apns-dev-key.p8"
+_candidate_apns_cert_file = "zproject/apns-dev.pem"
+if os.path.isfile(_candidate_apns_token_key_file):
+    APNS_TOKEN_KEY_FILE = _candidate_apns_token_key_file
+elif os.path.isfile(_candidate_apns_cert_file):
+    APNS_CERT_FILE = _candidate_apns_cert_file
 
 # Don't require anything about password strength in development
 PASSWORD_MIN_LENGTH = 0
@@ -123,9 +119,8 @@ PASSWORD_MAX_LENGTH = 100
 PASSWORD_MIN_GUESSES = 0
 
 # Two factor authentication: Use the fake backend for development.
-TWO_FACTOR_AUTHENTICATION_ENABLED = False
-#? TWO_FACTOR_CALL_GATEWAY = "two_factor.gateways.fake.Fake"
-#? TWO_FACTOR_SMS_GATEWAY = "two_factor.gateways.fake.Fake"
+TWO_FACTOR_CALL_GATEWAY = "two_factor.gateways.fake.Fake"
+TWO_FACTOR_SMS_GATEWAY = "two_factor.gateways.fake.Fake"
 
 # FAKE_LDAP_MODE supports using a fake LDAP database in the
 # development environment, without needing an LDAP server!
@@ -185,7 +180,7 @@ if FAKE_LDAP_MODE:
         }
     AUTHENTICATION_BACKENDS += ("zproject.backends.ZulipLDAPAuthBackend",)
 
-BILLING_ENABLED = False
+BILLING_ENABLED = True
 LANDING_PAGE_NAVBAR_MESSAGE: str | None = None
 
 # Our run-dev proxy uses X-Forwarded-Port to communicate to Django
@@ -196,26 +191,26 @@ LANDING_PAGE_NAVBAR_MESSAGE: str | None = None
 USE_X_FORWARDED_PORT = True
 
 # Override the default SAML entity ID
-#? SOCIAL_AUTH_SAML_SP_ENTITY_ID = "http://localhost:9991"
+SOCIAL_AUTH_SAML_SP_ENTITY_ID = "http://localhost:9991"
 
-#? SOCIAL_AUTH_SUBDOMAIN = "auth"
+SOCIAL_AUTH_SUBDOMAIN = "auth"
 
 MEMCACHED_USERNAME: str | None = None
 
-# SCIM_CONFIG: dict[str, SCIMConfigDict] = {
-#     "zulip": {
-#         "bearer_token": "token1234",
-#         "scim_client_name": "test-scim-client",
-#         "name_formatted_included": True,
-#     }
-# }
+SCIM_CONFIG: dict[str, SCIMConfigDict] = {
+    "zulip": {
+        "bearer_token": "token1234",
+        "scim_client_name": "test-scim-client",
+        "name_formatted_included": True,
+    }
+}
 
 SELF_HOSTING_MANAGEMENT_SUBDOMAIN = "selfhosting"
 DEVELOPMENT_DISABLE_PUSH_BOUNCER_DOMAIN_CHECK = True
 ZULIP_SERVICES_URL = f"http://{EXTERNAL_HOST}"
 
-ZULIP_SERVICE_PUSH_NOTIFICATIONS = False
-ZULIP_SERVICE_SUBMIT_USAGE_STATISTICS = False
+ZULIP_SERVICE_PUSH_NOTIFICATIONS = True
+ZULIP_SERVICE_SUBMIT_USAGE_STATISTICS = True
 
 # This value needs to be lower in development than usual to allow
 # for quicker testing of the feature.
@@ -225,19 +220,10 @@ RESOLVE_TOPIC_UNDO_GRACE_PERIOD_SECONDS = 5
 # See: https://zulip.readthedocs.io/en/latest/subsystems/realms.html#working-with-subdomains-in-development-environment
 ROOT_DOMAIN_LANDING_PAGE = True
 
-#? TOPIC_SUMMARIZATION_MODEL = "groq/llama-3.3-70b-versatile"
+TOPIC_SUMMARIZATION_MODEL = "groq/llama-3.3-70b-versatile"
 # Defaults based on groq's pricing for Llama 3.3 70B Versatile 128k.
 # https://groq.com/pricing/
-#? OUTPUT_COST_PER_GIGATOKEN = 590
-#? INPUT_COST_PER_GIGATOKEN = 790
-#? MAX_PER_USER_MONTHLY_AI_COST = 1
-#? MAX_WEB_DATA_IMPORT_SIZE_MB = 1024
-
-#* Third Party Integrations
-JITSI_SERVER_URL = None
-BIG_BLUE_BUTTON_URL = None
-VIDEO_ZOOM_CLIENT_ID = ""
-GIPHY_API_KEY = ""
-DROPBOX_APP_KEY = ""
-TWITTER_CONSUMER_KEY = ""
-KATEX_SERVER = False
+OUTPUT_COST_PER_GIGATOKEN = 590
+INPUT_COST_PER_GIGATOKEN = 790
+MAX_PER_USER_MONTHLY_AI_COST = 1
+MAX_WEB_DATA_IMPORT_SIZE_MB = 1024

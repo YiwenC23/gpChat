@@ -1,0 +1,2 @@
+﻿# Ollama – Large‑language‑model runtime
+deb [arch=amd64 signed-by=/usr/share/keyrings/ollama.gpg] https://ollama.com/apt/ubuntu jammy main

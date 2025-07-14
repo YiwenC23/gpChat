@@ -219,24 +219,58 @@ def install_ollama() -> None:
     print("Installing Ollama AI runtime...")
     
     # Check if Ollama is already installed
+    ollama_installed = False
     try:
-        run(["which", "ollama"])
-        print("Ollama already installed, checking version...")
-        run(["ollama", "--version"])
-    except subprocess.CalledProcessError:
+        result = subprocess.run(["which", "ollama"], capture_output=True, text=True)
+        if result.returncode == 0:
+            ollama_installed = True
+            print("Ollama already installed, checking version...")
+            run(["ollama", "--version"])
+    except Exception:
+        pass
+    
+    if not ollama_installed:
         print("Installing Ollama...")
-        # Install Ollama using official script
-        run(["bash", "-c", "curl -fsSL https://ollama.ai/install.sh | sh"])
+        # Install Ollama using official script with proper error handling
+        try:
+            # For Ubuntu/Debian systems
+            if os.path.exists("/etc/debian_version"):
+                # Download and install using the official method
+                run_as_root(["bash", "-c", "curl -fsSL https://ollama.com/install.sh | sh"])
+            else:
+                print("Warning: Automated Ollama installation only supported on Debian/Ubuntu")
+                print("Please install Ollama manually: https://ollama.com/download")
+                return
+        except subprocess.CalledProcessError as e:
+            print(f"Warning: Failed to install Ollama: {e}")
+            print("Please install Ollama manually: https://ollama.com/download")
+            return
     
     # Ensure Ollama service is running
     try:
-        # Start Ollama in background if not running
-        subprocess.Popen(["ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        # Give it a moment to start
-        import time
-        time.sleep(3)
-    except Exception:
-        print("Ollama may already be running, continuing...")
+        # Check if Ollama service is already running
+        result = subprocess.run(["pgrep", "-f", "ollama serve"], capture_output=True)
+        if result.returncode != 0:
+            print("Starting Ollama service...")
+            # For systemd systems (most modern Linux)
+            if os.path.exists("/bin/systemctl"):
+                try:
+                    run_as_root(["systemctl", "start", "ollama"])
+                    run_as_root(["systemctl", "enable", "ollama"])
+                except subprocess.CalledProcessError:
+                    # Fallback to manual start
+                    subprocess.Popen(["ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            else:
+                # Direct start for non-systemd systems
+                subprocess.Popen(["ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            # Give it a moment to start
+            import time
+            time.sleep(5)
+        else:
+            print("Ollama service is already running")
+    except Exception as e:
+        print(f"Warning: Could not start Ollama service: {e}")
+        print("You may need to start it manually with: ollama serve")
     
     # Download required models
     print("Downloading AI models (this may take several minutes)...")
@@ -273,7 +307,7 @@ def install_system_deps() -> None:
     if BUILD_PGROONGA_FROM_SOURCE:
         run_as_root(["./scripts/lib/build-pgroonga"])
     
-    # Install Ollama AI runtime
+    # Install Ollama AI runtime (always installed for AI agent support)
     install_ollama()
 
 

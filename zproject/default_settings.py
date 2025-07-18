@@ -727,6 +727,42 @@ INPUT_COST_PER_GIGATOKEN: int = 0
 OUTPUT_COST_PER_GIGATOKEN: int = 0
 MAX_PER_USER_MONTHLY_AI_COST: float | None = 0.5
 
+# AI Agents Configuration (Ollama Integration)
+# Enable/disable the AI agents subsystem
+AI_AGENTS_ENABLED: bool = True
+
+# Ollama server configuration
+OLLAMA_BASE_URL: str = "http://localhost:11434"
+OLLAMA_CONNECTION_TIMEOUT: int = 30
+OLLAMA_REQUEST_TIMEOUT: int = 120
+
+# Default AI models
+AI_AGENTS_DEFAULT_MODEL: str = "llama3.1:8b"
+AI_AGENTS_EMBEDDING_MODEL: str = "nomic-embed-text:v1.5"
+AI_AGENTS_CODE_MODEL: str = "llama3.1:8b"
+
+# AI Agents capabilities
+AI_AGENTS_ENABLE_CHAT: bool = True
+AI_AGENTS_ENABLE_EMBEDDINGS: bool = True
+
+# Usage limits and performance
+AI_AGENTS_MAX_REQUESTS_PER_USER_PER_DAY: int = 100
+AI_AGENTS_MAX_CONTEXT_LENGTH: int = 4096
+AI_AGENTS_MAX_MESSAGE_LENGTH: int = 5000
+AI_AGENTS_MAX_EMBEDDING_TEXT_LENGTH: int = 10000
+AI_AGENTS_DEFAULT_TEMPERATURE: float = 0.7
+AI_AGENTS_DEFAULT_TOP_P: float = 0.9
+
+# Model management
+AI_AGENTS_AUTO_DOWNLOAD_MODELS: bool = True
+AI_AGENTS_MODEL_STORAGE_PATH: str = "/var/lib/ollama/models"
+AI_AGENTS_MAX_MODEL_SIZE_GB: int = 50
+
+# Security and privacy
+AI_AGENTS_LOG_INTERACTIONS: bool = True
+AI_AGENTS_RETAIN_LOGS_DAYS: int = 90
+AI_AGENTS_ALLOW_CUSTOM_MODELS: bool = False
+
 # URL of the navigation tour video displayed to new users.
 # Set it to None to disable it.
 NAVIGATION_TOUR_VIDEO_URL: str | None = (

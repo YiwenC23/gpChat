@@ -1,4 +1,11 @@
 from zerver.models import lookups as lookups
+from zerver.models.ai_agents import AIAgentAuditLog as AIAgentAuditLog
+from zerver.models.ai_agents import AIAgentConfig as AIAgentConfig
+from zerver.models.ai_agents import AIAgentChannelConversation as AIAgentChannelConversation
+from zerver.models.ai_agents import AIAgentInteraction as AIAgentInteraction
+from zerver.models.ai_agents import AIAgentMessage as AIAgentMessage
+from zerver.models.ai_agents import AIAgentModel as AIAgentModel
+from zerver.models.ai_agents import AIAgentUsageStats as AIAgentUsageStats
 from zerver.models.alert_words import AlertWord as AlertWord
 from zerver.models.bots import BotConfigData as BotConfigData
 from zerver.models.bots import BotStorageData as BotStorageData

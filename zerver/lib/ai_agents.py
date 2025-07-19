@@ -29,35 +29,26 @@ class OllamaModelError(Exception):
 class OllamaClient:
     """Client for interacting with local Ollama installation"""
 
-    _shared_session = requests.Session()
-
     def __init__(self, base_url: str = "http://localhost:11434"):
         self.base_url = base_url.rstrip("/")
-        self.session = OllamaClient._shared_session
-    def _make_request(self, method: str, endpoint: str, timeout: Optional[float] = None, **kwargs) -> requests.Response:
-        """
-        Make HTTP request to Ollama API with error handling.
+        self.session = requests.Session()
 
-        Args:
-            method: HTTP method (e.g., 'GET', 'POST').
-            endpoint: API endpoint.
-            timeout: Optional timeout for the request in seconds.
-            **kwargs: Additional arguments for requests.Session.request.
-        """
+    def _make_request(self, method: str, endpoint: str, **kwargs) -> requests.Response:
+        """Make HTTP request to Ollama API with error handling"""
         url = f"{self.base_url}/api/{endpoint}"
-        # Set default timeout if not provided
-        if timeout is not None:
-            kwargs["timeout"] = timeout
-        elif "timeout" not in kwargs:
-            kwargs["timeout"] = 30
         
+        # For generate requests, disable timeout.
+        if endpoint == "generate":
+            kwargs["timeout"] = 3000000  # or set to a very high value
+
         try:
             # Log the request details for debugging (only in debug mode)
-            if 'json' in kwargs and logger.isEnabledFor(logging.DEBUG):
+            if "json" in kwargs and logger.isEnabledFor(logging.DEBUG):
                 logger.debug(f"Making {method} request to {url} with payload: {kwargs['json']}")
             response = self.session.request(method, url, **kwargs)
             response.raise_for_status()
             return response
+        
         
         except requests.exceptions.RequestException as e:
             logger.error(f"Ollama API request failed: {e}")
@@ -187,12 +178,7 @@ class ZulipAIAgent:
 
     def __init__(self, realm: Realm):
         self.realm = realm
-        
-        base_url = getattr(settings, "OLLAMA_BASE_URL", "http://localhost:11434")
-        if not isinstance(base_url, str) or not base_url.strip():
-            raise ValueError("Invalid OLLAMA_BASE_URL setting")
-        
-        self.ollama = OllamaClient(base_url)
+        self.ollama = OllamaClient(getattr(settings, "OLLAMA_BASE_URL", "http://localhost:11434"))
         self.default_model = getattr(settings, "AI_AGENTS_DEFAULT_MODEL", "llama3.1:8b")
         self.embedding_model = getattr(settings, "AI_AGENTS_EMBEDDING_MODEL", "nomic-embed-text:v1.5")
 

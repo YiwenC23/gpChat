@@ -61,8 +61,7 @@ Vagrant.configure("2") do |config|
 
   config.vm.network "forwarded_port", guest: 9991, host: host_port, host_ip: host_ip_addr
   config.vm.network "forwarded_port", guest: 9994, host: host_port + 3, host_ip: host_ip_addr
-  # PostgreSQL port forwarding for external tools like Supabase Studio
-  config.vm.network "forwarded_port", guest: 5432, host: postgres_port, host_ip: host_ip_addr
+
   # Specify Docker provider before VirtualBox provider so it's preferred.
   config.vm.provider "docker" do |d, override|
     override.vm.box = nil

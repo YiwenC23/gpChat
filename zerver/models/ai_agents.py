@@ -7,7 +7,7 @@ from django.core.exceptions import ValidationError
 
 from zerver.models.realms import Realm
 from zerver.models.users import UserProfile
-from zerver.models import Stream
+from zerver.models.streams import Stream
 
 
 class AIAgentModel(models.Model):
@@ -149,71 +149,103 @@ class AIAgentInteraction(models.Model):
         return f"{self.user.full_name} - {self.agent_type} - {self.timestamp}"
 
 
-class AIAgentChannelConversation(models.Model):
-    """AI Agent participation in group chat channels"""
+# class AIAgentChannelConversation(models.Model):
+#     """AI Agent participation in group chat channels"""
+    
+#     realm = models.ForeignKey(Realm, on_delete=models.CASCADE)
+#     user = models.ForeignKey(UserProfile, on_delete=models.CASCADE)
+    
+#     # Channel information
+#     stream = models.ForeignKey("Stream", on_delete=models.CASCADE)
+#     topic = models.CharField(max_length=200)
+
+#     # Conversation metadata
+#     title = models.CharField(max_length=200, blank=True)
+#     agent_type = models.CharField(max_length=50)
+    
+#     # Agent behavior settings
+#     auto_reply = models.BooleanField(default=False)
+#     mention_only = models.BooleanField(default=True)  # Only respond when mentioned
+
+#     # Context handling
+#     context_window_size = models.IntegerField(default=10)  # Number of messages to include as context
+#     include_thread_context = models.BooleanField(default=True)
+    
+#     # State
+#     is_active = models.BooleanField(default=True)
+#     last_processed_message_id = models.IntegerField(null=True, blank=True)
+
+#     # Timestamps
+#     created_at = models.DateTimeField(default=timezone_now)
+#     last_activity = models.DateTimeField(default=timezone_now)
+    
+#     class Meta:
+#         db_table = "zerver_aiagentchannelconversation"
+#         unique_together = ("stream", "topic", "agent_type")
+#         indexes = [
+#             models.Index(fields=["realm", "stream", "topic"]),
+#             models.Index(fields=["stream", "is_active"]),
+#             models.Index(fields=["last_activity"]),
+#         ]
+        
+    
+#     def __str__(self) -> str:
+#         return f"AI Agent in {self.stream.name} > {self.topic}"
+    
+#     def should_process_message(self, message: "Message") -> bool:
+#         """Determine if the agent should process a given message"""
+#         if not self.is_active:
+#             return False
+#         if self.mention_only and not self.is_mentioned(message):
+#             return False
+#         return True
+    
+#     def is_mentioned(self, message: "Message") -> bool:
+#         """Check if the AI agent is mentioned in the message"""
+#         if self.user in message.mentioned_users.all():
+#             return True
+#         if self.stream and message.stream_id == self.stream.id:
+#             return message.content.startswith(f"@{self.user.full_name}") or \
+#                    message.content.startswith(f"@**{self.user.full_name}**")
+#         return False
+
+
+class AIAgentConversation(models.Model):
+    """Multi-turn conversations with AI agents"""
     
     realm = models.ForeignKey(Realm, on_delete=models.CASCADE)
     user = models.ForeignKey(UserProfile, on_delete=models.CASCADE)
     
-    # Channel information
-    stream = models.ForeignKey(Stream, on_delete=models.CASCADE)
-    topic = models.CharField(max_length=200)
-
     # Conversation metadata
     title = models.CharField(max_length=200, blank=True)
     agent_type = models.CharField(max_length=50)
     
-    # Agent behavior settings
-    auto_reply = models.BooleanField(default=False)
-    mention_only = models.BooleanField(default=True)  # Only respond when mentioned
-
-    # Context handling
-    context_window_size = models.IntegerField(default=10)  # Number of messages to include as context
-    include_thread_context = models.BooleanField(default=True)
+    # Context
+    context_type = models.CharField(max_length=50, blank=True)
+    context_id = models.IntegerField(null=True, blank=True)
     
     # State
     is_active = models.BooleanField(default=True)
-    last_processed_message_id = models.IntegerField(null=True, blank=True)
-
+    
     # Timestamps
     created_at = models.DateTimeField(default=timezone_now)
     last_activity = models.DateTimeField(default=timezone_now)
     
     class Meta:
-        db_table = "zerver_aiagentchannelconversation"
-        unique_together = ("stream", "topic", "agent_type")
+        db_table = "zerver_aiagentconversation"
         indexes = [
-            models.Index(fields=["realm", "stream", "topic"]),
-            models.Index(fields=["stream", "is_active"]),
+            models.Index(fields=["realm", "user", "is_active"]),
             models.Index(fields=["last_activity"]),
         ]
-        
     
     def __str__(self) -> str:
-        return f"AI Agent in {self.stream.name} > {self.topic}"
-    
-    def should_process_message(self, message: "Message") -> bool:
-        """Determine if the agent should process a given message"""
-        if not self.is_active:
-            return False
-        if self.mention_only and not self.is_mentioned(message):
-            return False
-        return True
-    
-    def is_mentioned(self, message: "Message") -> bool:
-        """Check if the AI agent is mentioned in the message"""
-        if self.user in message.mentioned_users.all():
-            return True
-        if self.stream and message.stream_id == self.stream.id:
-            return message.content.startswith(f"@{self.user.full_name}") or \
-                   message.content.startswith(f"@**{self.user.full_name}**")
-        return False
+        return f"Conversation: {self.title or self.id} ({self.user.full_name})"
 
 
 class AIAgentMessage(models.Model):
     """Individual messages in AI agent conversations"""
     conversation = models.ForeignKey(
-        "AIAgentConversation", 
+        AIAgentConversation, 
         on_delete=models.CASCADE, 
         related_name="messages"
     )

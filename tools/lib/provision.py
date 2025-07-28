@@ -216,8 +216,10 @@ REPO_STOPWORDS_PATH = os.path.join(
 
 def install_ollama() -> None:
     """Install Ollama AI runtime and download base models"""
-    print("Installing Ollama AI runtime...")
-    
+    print(f"\n=====Installing Ollama AI runtime=====")
+
+    import time, shutil, textwrap, tempfile
+
     # Check if Ollama is already installed
     ollama_installed = False
     try:
@@ -228,65 +230,172 @@ def install_ollama() -> None:
             run(["ollama", "--version"])
     except Exception:
         pass
-    
+
     if not ollama_installed:
         print("Installing Ollama...")
         # Install Ollama using official script with proper error handling
         try:
             # For Ubuntu/Debian systems
             if os.path.exists("/etc/debian_version"):
-                # Download and install using the official method
-                run_as_root(["bash", "-c", "curl -fsSL https://ollama.com/install.sh | sh"])
+                tmp_tgz = "/tmp/ollama.tgz"
+                # Check if is arm64 architecture or amd64
+                if platform.machine() == "aarch64":
+                    print("Installing Ollama for arm64 architecture...")
+                    # Download and install using the official method for arm64
+                    run_as_root(["curl", "-L", "https://ollama.com/download/ollama-linux-arm64.tgz", "-o", f"{tmp_tgz}"])
+                elif platform.machine() == "x86_64":
+                    print("Installing Ollama for x86_64 architecture...")
+                    # Download and install using the official method for amd64
+                    run_as_root(["curl", "-L", "https://ollama.com/download/ollama-linux-amd64.tgz", "-o", f"{tmp_tgz}"])
+                run_as_root(["tar", "-C", "/usr", "-xzf", f"{tmp_tgz}"])
+                run_as_root(["rm", "-f", f"{tmp_tgz}"]) # Clean up the temporary file
             else:
                 print("Warning: Automated Ollama installation only supported on Debian/Ubuntu")
                 print("Please install Ollama manually: https://ollama.com/download")
-                return
+
+            # Configure Ollama Service
+            # Check if ollama user exists, if not create it
+            try:
+                subprocess.run(["id", "ollama"], capture_output=True, check=True)
+                print("Ollama user already exists.")
+            except subprocess.CalledProcessError:
+                print("Creating ollama user...")
+                run_as_root(["useradd", "-r", "-s", "/bin/false", "-U", "-m", "-d", "/usr/share/ollama", "ollama"])
+                print("Adding current user to ollama group...")
+                run_as_root(["bash", "-c", "usermod -a -G ollama $(whoami)"])
+
+            service_path = "/etc/systemd/system/ollama.service"
+            ollama_path = shutil.which("ollama")
+
+            service_content = textwrap.dedent(f"""\
+                [Unit]
+                Description=Ollama Service
+                After=network-online.target
+
+                [Service]
+                ExecStart={ollama_path} serve
+                User=ollama
+                Group=ollama
+                Restart=always
+                RestartSec=3
+                Environment="PATH=$PATH"
+                Environment="OLLAMA_HOST=0.0.0.0"
+                Environment="OLLAMA_MODELS=/usr/share/ollama/.ollama/models"
+
+                [Install]
+                WantedBy=multi-user.target
+            """)
+
+            print("Creating Ollama service file...")
+            with tempfile.NamedTemporaryFile("w", delete=False) as tmp:
+                tmp.write(service_content)
+                temp_path = tmp.name
+            run_as_root(["cp", temp_path, service_path])
+            print("Ollama service file created at", service_path)
+            run_as_root(["rm", "-f", f"{temp_path}"]) # Clean up the temporary file
+
+            print("Reload systemd and enable/start Ollama service...")
+            try:
+                run_as_root(["systemctl", "daemon-reload"])
+                run_as_root(["systemctl", "enable", "ollama"])
+                run_as_root(["systemctl", "start", "ollama"], sudo_args=["-H"])
+
+                # Give the service a moment to start
+                time.sleep(5)
+
+                # Check if the service started successfully
+                result = subprocess.run(["pgrep", "-f", "ollama serve"], capture_output=True)
+                if result.returncode != 0:
+                    print("Warning: Ollama service did not start successfully.")
+                    print("You may need to start it manually with: ollama serve")
+                else:
+                    print("Ollama service started successfully.")
+            except Exception as e:
+                print(f"Warning: Could not start Ollama service: {e}")
+                print("You may need to start it manually with: ollama serve")
+                pass
         except subprocess.CalledProcessError as e:
             print(f"Warning: Failed to install Ollama: {e}")
             print("Please install Ollama manually: https://ollama.com/download")
-            return
-    
-    # Ensure Ollama service is running
-    try:
-        # Check if Ollama service is already running
-        result = subprocess.run(["pgrep", "-f", "ollama serve"], capture_output=True)
-        if result.returncode != 0:
-            print("Starting Ollama service...")
-            # For systemd systems (most modern Linux)
-            if os.path.exists("/bin/systemctl"):
-                try:
-                    run_as_root(["systemctl", "start", "ollama"])
-                    run_as_root(["systemctl", "enable", "ollama"])
-                except subprocess.CalledProcessError:
-                    # Fallback to manual start
-                    subprocess.Popen(["ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            else:
-                # Direct start for non-systemd systems
-                subprocess.Popen(["ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            # Give it a moment to start
-            import time
-            time.sleep(5)
-        else:
-            print("Ollama service is already running")
-    except Exception as e:
-        print(f"Warning: Could not start Ollama service: {e}")
-        print("You may need to start it manually with: ollama serve")
-    
-    # Download required models
-    print("Downloading AI models (this may take several minutes)...")
-    models_to_download = [
-        "llama3.1:8b",       # Main language model
-        "nomic-embed-text:v1.5",  # Embedding model
-    ]
-    
-    for model in models_to_download:
+            pass
+
+
+def download_ollama_models():
+    import shutil
+    # Check disk space before downloading models
+    def check_disk_space(path="/usr/share/ollama/.ollama/models", required_gb=10):
+        """Check if there's enough disk space for models"""
         try:
-            print(f"Downloading {model}...")
-            run(["ollama", "pull", model])
-            print(f"Successfully downloaded {model}")
+            stat = shutil.disk_usage(path if os.path.exists(path) else "/")
+            available_gb = stat.free / (1024**3)
+            return available_gb >= required_gb, available_gb
+        except Exception:
+            return True, 0  # Assume enough space if check fails
+
+    # Model sizes in GB (approximate)
+    models_to_download = [
+        ("llama3.1:8b", 4.7),       # Main language model ~4.7GB
+        ("nomic-embed-text:v1.5", 0.3),  # Embedding model ~300MB
+    ]
+
+    # Check total required space
+    total_required_gb = sum(size for _, size in models_to_download) + 1  # +1GB buffer
+    has_space, available_gb = check_disk_space()
+
+    if not has_space:
+        print(f"Warning: Insufficient disk space for model downloads!")
+        print(f"Required: ~{total_required_gb:.1f}GB, Available: {available_gb:.1f}GB")
+        print("Skipping model downloads. You can download them later when you have more space:")
+        for model, _ in models_to_download:
+            print(f"  ollama pull {model}")
+        print("Continuing with the rest of the provisioning process...")
+        return  # Skip model downloads but continue provisioning
+
+    # Download models with individual error handling
+    for model, size_gb in models_to_download:
+        try:
+            # Check space before each download
+            has_space, available_gb = check_disk_space()
+            if available_gb < size_gb + 0.5:  # Need model size + 0.5GB buffer
+                print(f"Warning: Insufficient space for {model} (needs ~{size_gb}GB, have {available_gb:.1f}GB)")
+                print(f"Skipping {model}. You can download it later with: ollama pull {model}")
+                continue
+
+            print(f"* Downloading {model} (~{size_gb}GB)...")
+
+            # Run with timeout to prevent hanging
+            result = subprocess.run(
+                ["ollama", "pull", model],
+                timeout=1800,  # 30 minute timeout
+                capture_output=True,
+                text=True
+            )
+
+            if result.returncode == 0:
+                print(f"✓ Successfully downloaded {model}")
+            else:
+                # Check if it's a disk space error
+                if "no space" in result.stderr.lower() or "disk full" in result.stderr.lower():
+                    print(f"✗ Insufficient disk space while downloading {model}")
+                    print(f"  Free up space and run: ollama pull {model}")
+                else:
+                    print(f"✗ Failed to download {model}: {result.stderr}")
+                    print(f"  You can try again later with: ollama pull {model}")
+
+        except subprocess.TimeoutExpired:
+            print(f"✗ Download of {model} timed out after 30 minutes")
+            print(f"  You can try again later with: ollama pull {model}")
+            pass
         except subprocess.CalledProcessError as e:
-            print(f"Warning: Failed to download {model}: {e}")
-            print("You can download it later with: ollama pull " + model)
+            print(f"✗ Failed to download {model}: {e}")
+            print(f"  You can try again later with: ollama pull {model}")
+            pass
+        except Exception as e:
+            print(f"✗ Unexpected error downloading {model}: {e}")
+            print(f"  You can try again later with: ollama pull {model}")
+            pass
+
+    print("Ollama models downloaded successfully!")
 
 
 def install_system_deps() -> None:
@@ -306,9 +415,6 @@ def install_system_deps() -> None:
         run_as_root(["./scripts/lib/build-groonga"])
     if BUILD_PGROONGA_FROM_SOURCE:
         run_as_root(["./scripts/lib/build-pgroonga"])
-    
-    # Install Ollama AI runtime (always installed for AI agent support)
-    install_ollama()
 
 
 def install_apt_deps(deps_to_install: list[str]) -> None:
@@ -332,6 +438,10 @@ def install_apt_deps(deps_to_install: list[str]) -> None:
             *deps_to_install,
         ]
     )
+
+    # Install Ollama AI runtime (always installed for AI agent support)
+    install_ollama()
+    download_ollama_models()
 
 
 def install_yum_deps(deps_to_install: list[str]) -> None:

@@ -1,0 +1,361 @@
+/**
+ * AI Agents frontend module for Zulip-Ollama integration
+ */
+import $ from "jquery";
+import _ from "lodash";
+
+import * as channel from "./channel.ts";
+import * as dialog_widget from "./dialog_widget.ts";
+import {$t, $t_html} from "./i18n.ts";
+import * as loading from "./loading.ts";
+import * as overlays from "./overlays.ts";
+import {page_params} from "./page_params.ts";
+import * as settings_data from "./settings_data.ts";
+import * as ui_report from "./ui_report.ts";
+
+export interface AIHealthStatus {
+    enabled: boolean;
+    status: "healthy" | "unhealthy" | "disabled" | "error";
+    message?: string;
+    models?: {
+        default: string;
+        embedding: string;
+    };
+    ollama_url?: string;
+}
+
+export interface AIModel {
+    name: string;
+    model: string;
+    modified_at: string;
+    size: number;
+    digest: string;
+    details?: {
+        parent_model: string;
+        format: string;
+        family: string;
+        families: string[];
+        parameter_size: string;
+        quantization_level: string;
+    };
+}
+
+export interface AIChatResponse {
+    response: string;
+    model: string;
+    agent_type: string;
+}
+
+export interface AIModelsResponse {
+    models: AIModel[];
+    default_model: string;
+    embedding_model: string;
+}
+
+class AIAgentsManager {
+    private health_status: AIHealthStatus | null = null;
+    private models: AIModel[] = [];
+    private is_initialized = false;
+
+    async initialize(): Promise<void> {
+        if (this.is_initialized) {
+            return;
+        }
+
+        try {
+            await this.check_health();
+            await this.load_models();
+            this.is_initialized = true;
+        } catch (error) {
+            console.warn("Failed to initialize AI agents:", error);
+        }
+    }
+
+    async check_health(): Promise<AIHealthStatus> {
+        try {
+            const response = await channel.get({
+                url: "/json/ai/health",
+            });
+            this.health_status = response;
+            return response;
+        } catch (error) {
+            console.error("Failed to check AI health:", error);
+            this.health_status = {
+                enabled: false,
+                status: "error",
+                message: "Failed to check AI service status",
+            };
+            return this.health_status;
+        }
+    }
+
+    async load_models(): Promise<AIModel[]> {
+        try {
+            const response: AIModelsResponse = await channel.get({
+                url: "/json/ai/models",
+            });
+            this.models = response.models;
+            return response.models;
+        } catch (error) {
+            console.error("Failed to load AI models:", error);
+            this.models = [];
+            return [];
+        }
+    }
+
+    async chat(
+        message: string,
+        context?: string,
+        agent_type: string = "general",
+        model?: string,
+    ): Promise<AIChatResponse> {
+        const data: Record<string, any> = {
+            message,
+            agent_type,
+        };
+
+        if (context) {
+            data.context = context;
+        }
+
+        if (model) {
+            data.model = model;
+        }
+
+        return await channel.post({
+            url: "/json/ai/chat",
+            data,
+        });
+    }
+
+    get_health_status(): AIHealthStatus | null {
+        return this.health_status;
+    }
+
+    // Export get_health_status as a standalone function
+    static get_health_status(): AIHealthStatus | null {
+        return ai_agents.get_health_status();
+    }
+
+    get_models(): AIModel[] {
+        return this.models;
+    }
+
+    is_enabled(): boolean {
+        return this.health_status?.enabled ?? false;
+    }
+
+    is_healthy(): boolean {
+        return this.health_status?.status === "healthy";
+    }
+
+    get_default_model(): string {
+        return this.health_status?.models?.default ?? "llama3.1:8b";
+    }
+
+    get_embedding_model(): string {
+        return this.health_status?.models?.embedding ?? "nomic-embed-text:v1.5";
+    }
+}
+
+export const ai_agents = new AIAgentsManager();
+
+// UI Components
+export function show_ai_status_modal(): void {
+    const health_status = ai_agents.get_health_status();
+    const models = ai_agents.get_models();
+
+    let status_html = "";
+    let models_html = "";
+
+    if (health_status) {
+        const status_class = health_status.status === "healthy" ? "success" : "error";
+        const status_icon = health_status.status === "healthy" ? "check-circle" : "times-circle";
+        
+        status_html = `
+            <div class="ai-status-section">
+                <h3>${$t({defaultMessage: "AI Service Status"})}</h3>
+                <div class="ai-status-item">
+                    <i class="fa fa-${status_icon} text-${status_class}"></i>
+                    <span class="ai-status-text">${health_status.status.toUpperCase()}</span>
+                </div>
+                ${health_status.message ? `<p class="ai-status-message">${health_status.message}</p>` : ""}
+                ${health_status.ollama_url ? `<p class="ai-ollama-url">Ollama URL: ${health_status.ollama_url}</p>` : ""}
+            </div>
+        `;
+    }
+
+    if (models.length > 0) {
+        models_html = `
+            <div class="ai-models-section">
+                <h3>${$t({defaultMessage: "Available Models"})}</h3>
+                <div class="ai-models-list">
+                    ${models.map((model) => {
+                        const size_gb = (model.size / (1024 ** 3)).toFixed(1);
+                        const is_default = model.name === ai_agents.get_default_model();
+                        const is_embedding = model.name === ai_agents.get_embedding_model();
+                        
+                        return `
+                            <div class="ai-model-item">
+                                <div class="ai-model-name">
+                                    ${model.name}
+                                    ${is_default ? '<span class="ai-model-badge default">Default</span>' : ""}
+                                    ${is_embedding ? '<span class="ai-model-badge embedding">Embedding</span>' : ""}
+                                </div>
+                                <div class="ai-model-details">
+                                    <span class="ai-model-size">${size_gb} GB</span>
+                                    <span class="ai-model-modified">${new Date(model.modified_at).toLocaleDateString()}</span>
+                                </div>
+                            </div>
+                        `;
+                    }).join("")}
+                </div>
+            </div>
+        `;
+    }
+
+    const html_body = `
+        <div class="ai-status-modal">
+            ${status_html}
+            ${models_html}
+            ${!health_status?.enabled ? `
+                <div class="ai-disabled-message">
+                    <p>${$t({defaultMessage: "AI agents are not enabled on this server."})}</p>
+                </div>
+            ` : ""}
+        </div>
+    `;
+
+    dialog_widget.launch({
+        html_heading: $t_html({defaultMessage: "AI Agents Status"}),
+        html_body,
+        html_submit_button: $t_html({defaultMessage: "Close"}),
+        on_click() {
+            // Do nothing, just close
+        },
+        single_footer_button: true,
+        focus_submit_on_open: true,
+    });
+}
+
+export function show_ai_chat_modal(): void {
+    if (!ai_agents.is_enabled() || !ai_agents.is_healthy()) {
+        ui_report.error(
+            $t({defaultMessage: "AI service is not available"}),
+            undefined,
+            3000,
+        );
+        return;
+    }
+
+    const models = ai_agents.get_models();
+    const default_model = ai_agents.get_default_model();
+
+    const model_options = models.map((model) => 
+        `<option value="${model.name}" ${model.name === default_model ? "selected" : ""}>
+            ${model.name} (${(model.size / (1024 ** 3)).toFixed(1)} GB)
+        </option>`
+    ).join("");
+
+    const html_body = `
+        <div class="ai-chat-modal">
+            <div class="ai-chat-settings">
+                <label for="ai-chat-model">${$t({defaultMessage: "Model"})}:</label>
+                <select id="ai-chat-model" class="ai-chat-model-select">
+                    ${model_options}
+                </select>
+            </div>
+            <div class="ai-chat-input-section">
+                <label for="ai-chat-message">${$t({defaultMessage: "Message"})}:</label>
+                <textarea 
+                    id="ai-chat-message" 
+                    class="ai-chat-message-input" 
+                    placeholder="${$t({defaultMessage: "Ask me anything about Zulip..."})}"
+                    rows="4"
+                ></textarea>
+            </div>
+            <div class="ai-chat-response-section" style="display: none;">
+                <label>${$t({defaultMessage: "AI Response"})}:</label>
+                <div id="ai-chat-response" class="ai-chat-response"></div>
+            </div>
+        </div>
+    `;
+
+    dialog_widget.launch({
+        html_heading: $t_html({defaultMessage: "AI Chat"}),
+        html_body,
+        html_submit_button: $t_html({defaultMessage: "Send"}),
+        on_click() {
+            const message = $("#ai-chat-message").val() as string;
+            const model = $("#ai-chat-model").val() as string;
+            
+            if (!message.trim()) {
+                ui_report.error(
+                    $t({defaultMessage: "Please enter a message"}),
+                    undefined,
+                    3000,
+                );
+                return;
+            }
+
+            // Show loading state
+            $("#ai-chat-response-section").show();
+            $("#ai-chat-response").html('<div class="ai-loading">🤖 Thinking...</div>');
+            
+            // Disable submit button
+            const submit_button = $(".dialog_submit_button");
+            submit_button.prop("disabled", true);
+            submit_button.text($t({defaultMessage: "Sending..."}));
+
+            // Send chat request
+            ai_agents.chat(message, undefined, "general", model)
+                .then((response) => {
+                    $("#ai-chat-response").html(`
+                        <div class="ai-response-content">
+                            ${response.response.replace(/\n/g, "<br>")}
+                        </div>
+                        <div class="ai-response-meta">
+                            <small>Model: ${response.model}</small>
+                        </div>
+                    `);
+                })
+                .catch((error) => {
+                    $("#ai-chat-response").html(`
+                        <div class="ai-response-error">
+                            ❌ ${$t({defaultMessage: "Failed to get response"})}: ${error.message || error}
+                        </div>
+                    `);
+                })
+                .finally(() => {
+                    // Re-enable submit button
+                    submit_button.prop("disabled", false);
+                    submit_button.text($t({defaultMessage: "Send"}));
+                });
+        },
+        on_hidden() {
+            // Clear form when modal is closed
+            $("#ai-chat-message").val("");
+            $("#ai-chat-response").html("");
+            $("#ai-chat-response-section").hide();
+        },
+        focus_submit_on_open: false,
+    });
+
+    // Focus on message input
+    setTimeout(() => {
+        $("#ai-chat-message").focus();
+    }, 100);
+}
+
+// Initialize AI agents when page loads
+$(document).ready(() => {
+    ai_agents.initialize();
+});
+
+// Export for use in other modules
+export {AIAgentsManager};
+
+// Export initialize function for settings
+export function initialize(): void {
+    ai_agents.initialize();
+} 

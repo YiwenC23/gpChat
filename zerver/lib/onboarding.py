@@ -212,7 +212,94 @@ def send_welcome_bot_response(send_request: SendMessageRequest) -> None:
     human_response_lower = send_request.message.content.lower()
     human_user_recipient_id = send_request.message.sender.recipient_id
     assert human_user_recipient_id is not None
-    content = select_welcome_bot_response(human_response_lower)
+    
+    # Check if AI agents are enabled and try to use Ollama
+    ai_enabled = getattr(settings, "AI_AGENTS_ENABLED", False)
+    content = None
+    
+    # Log AI status for debugging
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info(f"Welcome Bot AI check - Enabled: {ai_enabled}, User: {send_request.message.sender.full_name}, Message: {send_request.message.content}")
+    
+    if ai_enabled:
+        try:
+            from zerver.lib.ai_agents import ZulipAIAgent, OllamaConnectionError, OllamaModelError
+            
+            # Create AI agent for welcome bot responses
+            ai_agent = ZulipAIAgent(send_request.realm)
+            
+            # Check if AI system is healthy
+            ai_healthy = ai_agent.is_healthy()
+            logger.info(f"AI system health check: {ai_healthy}")
+            
+            if ai_healthy:
+                # Build context for AI
+                context = f"""
+                You are the Welcome Bot in Zulip, a team collaboration platform. 
+                You are helping a new user named {send_request.message.sender.full_name} 
+                in the {send_request.realm.name} organization.
+                
+                Your role is to:
+                1. Help new users understand how to use Zulip
+                2. Answer questions about Zulip features
+                3. Provide helpful guidance for getting started
+                4. Be friendly and welcoming
+                
+                The user's message is: "{send_request.message.content}"
+                
+                If the user asks about specific Zulip features, provide helpful explanations.
+                If they ask for help with commands, you can mention these common commands:
+                - "help" or "?" - Show available commands
+                - "apps" - Information about mobile/desktop apps
+                - "profile" - How to edit profile settings
+                - "theme" - How to customize appearance
+                - "streams" or "channels" - Information about channels
+                - "topics" - How topics work in Zulip
+                - "keyboard shortcuts" - Navigation shortcuts
+                - "formatting" - Message formatting options
+                
+                Keep your responses concise, helpful, and welcoming.
+                """
+                
+                # Generate AI response
+                logger.info("Generating AI response...")
+                ai_response = ai_agent.chat(
+                    message=send_request.message.content,
+                    user=send_request.message.sender,
+                    context=context,
+                    agent_type="welcome_bot",
+                )
+                logger.info(f"AI response received: {ai_response[:100]}...")
+                
+                # Use AI response if it's reasonable
+                if ai_response and len(ai_response.strip()) > 10:
+                    content = ai_response
+                    # Log successful AI usage
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.info(f"AI welcome bot used for user {send_request.message.sender.full_name}: {ai_response[:100]}...")
+                else:
+                    # Log why AI response was not used
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.warning(f"AI response too short or empty: '{ai_response}'")
+                    
+        except (OllamaConnectionError, OllamaModelError) as e:
+            # Log error but continue with fallback
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"AI welcome bot failed: {e}, using fallback response")
+        except Exception as e:
+            # Log any other errors but continue with fallback
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"Unexpected error in AI welcome bot: {e}, using fallback response")
+    
+    # Fallback to original logic if AI is not available or fails
+    if content is None:
+        content = select_welcome_bot_response(human_response_lower)
+    
     realm_id = send_request.realm.id
     commands = bot_commands()
     if (

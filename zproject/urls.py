@@ -91,6 +91,7 @@ from zerver.views.message_flags import (
 from zerver.views.message_report import report_message_backend
 from zerver.views.message_send import render_message_backend, send_message_backend, zcommand_backend
 from zerver.views.message_summary import get_messages_summary
+from zerver.views.ai_agents import ai_chat, ai_health_check, ai_models
 from zerver.views.muted_users import mute_user, unmute_user
 from zerver.views.navigation_views import (
     add_navigation_view,
@@ -419,6 +420,10 @@ v1_api_and_json_patterns = [
     rest_path("messages/flags/narrow", POST=update_message_flags_for_narrow),
     rest_path("messages/<int:message_id>/history", GET=get_message_edit_history),
     rest_path("messages/matches_narrow", GET=messages_in_narrow_backend),
+    # AI Agents -> zerver.views.ai_agents
+    rest_path("ai/chat", POST=ai_chat),
+    rest_path("ai/health", GET=ai_health_check),
+    rest_path("ai/models", GET=ai_models),
     rest_path("users/me/subscriptions/properties", POST=update_subscription_properties_backend),
     rest_path("users/me/subscriptions/<int:stream_id>", PATCH=update_subscriptions_property),
     rest_path("submessage", POST=process_submessage),

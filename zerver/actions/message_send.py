@@ -119,6 +119,11 @@ from zerver.models.streams import (
 )
 from zerver.models.users import get_system_bot, get_user_by_delivery_email, is_cross_realm_bot_email
 from zerver.tornado.django_api import send_event_on_commit
+from zerver.models.streams import Stream
+from zerver.models.users import UserProfile
+from zerver.models.messages import Message
+from zerver.models.recipients import Recipient
+from zerver.lib.ai_agents import ZulipAIAgent
 
 
 def compute_irc_user_fullname(email: str) -> str:
@@ -265,7 +270,7 @@ def get_recipient_info(
             # A topic participant is anyone who either sent or reacted to messages in the topic.
             # It is expensive to call `participants_for_topic` if the topic has a large number
             # of messages. But it is fine to call it here, as this gets called only if the message
-            # has syntax that might be a @topic mention without having confirmed the syntax isn't, say,
+            # has syntax that might be a @topic mention without having confirmed the syntax isn't, say,
             # in a code block.
             topic_participant_user_ids = participants_for_topic(
                 realm_id, recipient.id, stream_topic.topic_name
@@ -951,6 +956,289 @@ def do_send_messages(
             active_user_ids=send_request.active_user_ids,
             recipient_type=send_request.message.recipient.type,
         )
+
+        # === AI poll/topic auto-reply for devel stream, only for human senders ===
+        try:
+            import logging
+            logger = logging.getLogger(__name__)
+            # Only handle stream messages
+            if hasattr(send_request.message.recipient, 'type') and send_request.message.recipient.type == 2:  # Recipient.STREAM
+                # Get stream name
+                stream = Stream.objects.filter(id=send_request.message.recipient.type_id).first()
+                if stream and stream.name == 'devel':
+                    sender = send_request.message.sender
+                    if hasattr(sender, 'is_bot') and not sender.is_bot:
+                        ai_enabled = getattr(settings, "AI_AGENTS_ENABLED", False)
+                        if ai_enabled:
+                            ai_agent = ZulipAIAgent(send_request.message.realm)
+                            if ai_agent.is_healthy():
+                                # === 智能 AI 判斷系統 ===
+                                # 1. 先判斷 intent 和建議的 stream/topic
+                                intent_prompt = f"""Analyze the following message and classify it into one of these categories:
+
+1. POLL - User wants to create a voting poll with multiple options
+2. QUESTION - User is asking for specific information, help, or advice
+3. STREAM_CREATE - User wants to create a new stream/channel for organizing discussions
+4. TOPIC_ORGANIZE - User wants to organize or categorize discussions into topics
+
+For each category, also suggest:
+- For POLL: What stream/topic would be appropriate
+- For QUESTION: What stream/topic would be appropriate  
+- For STREAM_CREATE: What stream name and description would be good
+- For TOPIC_ORGANIZE: What topic name would be appropriate
+
+Examples:
+- "最喜歡的程式語言" → POLL, stream: "general", topic: "程式語言討論"
+- "如何設定通知" → QUESTION, stream: "help", topic: "設定教學"
+- "建立一個專案討論區" → STREAM_CREATE, stream: "project-discussions", description: "專案相關討論"
+- "把這個歸類到技術問題" → TOPIC_ORGANIZE, topic: "技術問題"
+
+Reply in JSON format (no trailing commas):
+{{
+  "intent": "poll|question|stream_create|topic_organize",
+  "suggested_stream": "stream_name",
+  "suggested_topic": "topic_name",
+  "stream_description": "description_if_creating_new_stream"
+}}
+
+Message: '{send_request.message.content}'"""
+                                import json
+                                try:
+                                    intent_response = ai_agent.chat(
+                                        message=send_request.message.content,
+                                        user=sender,
+                                        context=intent_prompt,
+                                        agent_type="intent_classify",
+                                    ).strip()
+                                    logger.info(f"AI intent response: {intent_response}")
+                                    
+                                    # 嘗試解析 JSON
+                                    try:
+                                        intent_data = json.loads(intent_response)
+                                        intent = intent_data.get('intent', '').lower()
+                                        suggested_stream = intent_data.get('suggested_stream', 'general')
+                                        suggested_topic = intent_data.get('suggested_topic', 'general')
+                                        stream_description = intent_data.get('stream_description', '')
+                                    except json.JSONDecodeError:
+                                        logger.warning(f"Failed to parse JSON, using fallback: {intent_response}")
+                                        # 嘗試清理 JSON 格式
+                                        try:
+                                            # 移除多餘的逗號
+                                            cleaned_response = intent_response.replace(',}', '}').replace(',]', ']')
+                                            intent_data = json.loads(cleaned_response)
+                                            intent = intent_data.get('intent', '').lower()
+                                            suggested_stream = intent_data.get('suggested_stream', 'general')
+                                            suggested_topic = intent_data.get('suggested_topic', 'general')
+                                            stream_description = intent_data.get('stream_description', '')
+                                            logger.info(f"Successfully parsed cleaned JSON")
+                                        except:
+                                            # 備用關鍵字檢測
+                                            content_lower = send_request.message.content.lower()
+                                            poll_keywords = ['最喜歡', '最愛', '投票', '選擇', '選哪個', '哪個比較好', '推薦', '建議']
+                                            stream_keywords = ['建立', '創建', '新增', '開設', 'stream', '頻道', '討論區']
+                                            topic_keywords = ['歸類', '分類', 'topic', '主題']
+                                            
+                                            if any(keyword in content_lower for keyword in poll_keywords):
+                                                intent = 'poll'
+                                            elif any(keyword in content_lower for keyword in stream_keywords):
+                                                intent = 'stream_create'
+                                            elif any(keyword in content_lower for keyword in topic_keywords):
+                                                intent = 'topic_organize'
+                                            else:
+                                                intent = 'question'
+                                            
+                                            suggested_stream = 'general'
+                                            suggested_topic = 'general'
+                                            stream_description = ''
+                                    
+                                    logger.info(f"Parsed intent: {intent}, stream: {suggested_stream}, topic: {suggested_topic}")
+                                    
+                                    # 處理不同的 intent
+                                    if intent == 'poll':
+                                        # 2. poll prompt - 更明確的指令
+                                        context = f"""You are an assistant in a team chat. The user wants to create a poll.
+
+CRITICAL: You must reply with EXACTLY this format (each line separately):
+/poll Question here?
+Option 1
+Option 2
+Option 3
+
+Rules:
+- MUST start with /poll (no exceptions)
+- Question on the first line after /poll
+- Each option on a separate line
+- At least 2 options required
+- No quotes around question or options
+- No extra text or explanations
+- Use line breaks between each option
+
+Example for "最喜歡的程式語言":
+/poll 最喜歡的程式語言
+Python
+Java
+JavaScript
+
+User message: '{send_request.message.content}'
+
+Reply ONLY with the poll command (use line breaks):"""
+                                        ai_response = ai_agent.chat(
+                                            message=send_request.message.content,
+                                            user=sender,
+                                            context=context,
+                                            agent_type="welcome_bot",
+                                        )
+                                        if ai_response and len(ai_response.strip()) > 0:
+                                            import re
+                                            # 清理回應，只保留一行
+                                            clean_response = ai_response.strip().split('\n')[0].strip()
+                                            logger.info(f"AI poll response: {clean_response}")
+                                            
+                                            # 檢查是否已經是正確的 /poll 格式
+                                            if clean_response.startswith('/poll'):
+                                                poll_line = clean_response
+                                                logger.info(f"AI generated correct poll format: {poll_line}")
+                                            else:
+                                                # 如果 AI 沒有產生正確格式，我們手動構建
+                                                logger.info(f"AI response doesn't start with /poll, trying to fix: {clean_response}")
+                                                
+                                                # 嘗試從回應中提取問題和選項
+                                                lines = clean_response.split('\n')
+                                                if len(lines) >= 3:  # 至少有問題+2選項
+                                                    question = lines[0].strip()
+                                                    options = [line.strip() for line in lines[1:] if line.strip()]
+                                                    if len(options) >= 2:
+                                                        poll_line = f"/poll {question}\n" + "\n".join(options)
+                                                        logger.info(f"Fixed poll format: {poll_line}")
+                                                    else:
+                                                        poll_line = None
+                                                        logger.info(f"Not enough options found")
+                                                else:
+                                                    poll_line = None
+                                                    logger.info(f"Not enough lines in response")
+                                            
+                                            if poll_line:
+                                                topic = send_request.message.topic_name() or "general"
+                                                internal_send_stream_message(
+                                                    sender=get_system_bot(settings.WELCOME_BOT, send_request.message.realm.id),
+                                                    stream=stream,
+                                                    topic_name=topic,
+                                                    content=poll_line,
+                                                )
+                                                logger.info(f"AI poll sent: {poll_line[:100]}...")
+                                            else:
+                                                logger.info(f"AI poll skipped: could not generate valid poll format")
+                                    
+                                    elif intent == 'question':
+                                        # 2. 問答 prompt - 更明確的指令
+                                        context = f"""You are a helpful assistant in Zulip. The user has asked a question.
+Please provide a concise and helpful answer.
+
+Rules:
+- Answer directly and clearly
+- Keep it brief but informative
+- Be friendly and helpful
+- No need to mention that you're an AI assistant
+
+User question: '{send_request.message.content}'"""
+                                        ai_response = ai_agent.chat(
+                                            message=send_request.message.content,
+                                            user=sender,
+                                            context=context,
+                                            agent_type="welcome_bot",
+                                        )
+                                        if ai_response and len(ai_response.strip()) > 0:
+                                            # 清理回應，移除多餘的換行
+                                            clean_response = ai_response.strip()
+                                            topic = send_request.message.topic_name() or "general"
+                                            internal_send_stream_message(
+                                                sender=get_system_bot(settings.WELCOME_BOT, send_request.message.realm.id),
+                                                stream=stream,
+                                                topic_name=topic,
+                                                content=clean_response,
+                                            )
+                                            logger.info(f"AI Q&A sent: {clean_response[:100]}...")
+                                    
+                                    elif intent == 'stream_create':
+                                        # 3. 建立新 stream
+                                        from zerver.lib.streams import ensure_stream
+                                        try:
+                                            # 檢查 stream 是否已存在
+                                            existing_stream = Stream.objects.filter(
+                                                realm=send_request.message.realm,
+                                                name=suggested_stream
+                                            ).first()
+                                            
+                                            if existing_stream:
+                                                response = f"Stream '{suggested_stream}' 已經存在了！"
+                                            else:
+                                                # 建立新 stream
+                                                ensure_stream(
+                                                    realm=send_request.message.realm,
+                                                    stream_name=suggested_stream,
+                                                    stream_description=stream_description or f"由 AI 建立的 {suggested_stream} 討論區",
+                                                    acting_user=sender,
+                                                )
+                                                response = f"✅ 已成功建立新的 stream: **{suggested_stream}**\n\n描述: {stream_description or '無'}"
+                                            
+                                            topic = send_request.message.topic_name() or "general"
+                                            internal_send_stream_message(
+                                                sender=get_system_bot(settings.WELCOME_BOT, send_request.message.realm.id),
+                                                stream=stream,
+                                                topic_name=topic,
+                                                content=response,
+                                            )
+                                            logger.info(f"Stream creation response sent: {response[:100]}...")
+                                        except Exception as e:
+                                            logger.error(f"Failed to create stream: {e}")
+                                            error_response = f"❌ 建立 stream 時發生錯誤: {str(e)}"
+                                            topic = send_request.message.topic_name() or "general"
+                                            internal_send_stream_message(
+                                                sender=get_system_bot(settings.WELCOME_BOT, send_request.message.realm.id),
+                                                stream=stream,
+                                                topic_name=topic,
+                                                content=error_response,
+                                            )
+                                    
+                                    elif intent == 'topic_organize':
+                                        # 4. 歸類 topic - 只發送確認訊息，不重新發送原始訊息
+                                        try:
+                                            # 取得當前 stream
+                                            current_stream = stream
+                                            
+                                            # 建議的 topic
+                                            new_topic = suggested_topic or "歸類討論"
+                                            
+                                            # 發送確認訊息
+                                            response = f"✅ 建議將此訊息歸類到 topic: **{new_topic}**\n\n請手動將訊息移動到該 topic 或使用 `/move` 命令。"
+                                            topic = send_request.message.topic_name() or "general"
+                                            internal_send_stream_message(
+                                                sender=get_system_bot(settings.WELCOME_BOT, send_request.message.realm.id),
+                                                stream=current_stream,
+                                                topic_name=topic,
+                                                content=response,
+                                            )
+                                            logger.info(f"Topic organization suggestion sent: {new_topic}")
+                                        except Exception as e:
+                                            logger.error(f"Failed to send topic organization suggestion: {e}")
+                                            error_response = f"❌ 發送 topic 歸類建議時發生錯誤: {str(e)}"
+                                            topic = send_request.message.topic_name() or "general"
+                                            internal_send_stream_message(
+                                                sender=get_system_bot(settings.WELCOME_BOT, send_request.message.realm.id),
+                                                stream=stream,
+                                                topic_name=topic,
+                                                content=error_response,
+                                            )
+                                    
+                                    else:
+                                        logger.info(f"Unknown intent: {intent}")
+                                        
+                                except Exception as e:
+                                    logger.error(f"AI intent processing failed: {e}")
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"AI poll/topic auto-reply failed: {e}")
 
     bulk_insert_ums(ums)
 

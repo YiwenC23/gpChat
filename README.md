@@ -1,3 +1,82 @@
+# Zulip Chat with pgvector Integration
+
+This project enhances Zulip chat with vector search capabilities using pgvector for semantic search and similarity matching.
+
+## Features
+
+- Vector similarity search for messages
+- Integration with PostgreSQL's pgvector extension
+- Easy-to-use Python API for vector operations
+- Support for storing and querying document embeddings
+
+## Setup
+
+1. **Install Dependencies**:
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+2. **Configure Database**:
+   - Ensure PostgreSQL is installed with pgvector extension
+   - Copy `.env.example` to `.env` and update with your database credentials
+   - Run the following SQL to enable pgvector if not already enabled:
+     ```sql
+     CREATE EXTENSION IF NOT EXISTS vector;
+     ```
+
+3. **Running the Vector Database Worker**:
+   ```bash
+   # Activate the virtual environment
+   source .venv/bin/activate
+   
+   # Install required dependencies
+   pip install pgvector
+   
+   # Run the vector DB worker as a background service
+   python manage.py vector_db_worker
+   ```
+
+4. **Auto-Update Integration**:
+   To integrate auto-updating vector database with your Zulip server, add this to your settings:
+   ```python
+   from vector_db.app_integration import initialize_vector_db
+   
+   # Configure vector DB integration
+   initialize_vector_db(
+       run_initial_update=True,
+       enable_background_updates=True, 
+       update_interval_seconds=3600,  # Update every hour
+       lookback_days=1
+   )
+   ```
+
+5. **Usage Example**:
+   ```python
+   from vector_db import VectorDB
+   
+   # Initialize the database connection
+   db = VectorDB()
+   
+   # Create a table for embeddings (e.g., 384-dimensional vectors)
+   db.create_table("message_embeddings", 384)
+   
+   # Insert a vector
+   embedding = [0.1] * 384  # Replace with actual embedding
+   doc_id = db.insert_vector(
+       "message_embeddings", 
+       "Example message text", 
+       embedding,
+       {"user_id": 1, "message_id": 42}
+   )
+   
+   # Search for similar messages
+   results = db.search_similar("message_embeddings", embedding, limit=5)
+   for row in results:
+       print(f"ID: {row[0]}, Content: {row[1]}, Similarity: {row[2]}")
+   ```
+
+---
+
 # Zulip overview
 
 [Zulip](https://zulip.com) is an open-source team collaboration tool with unique

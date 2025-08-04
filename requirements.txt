@@ -1,0 +1,11 @@
+# Database
+psycopg2-binary==2.9.9
+pgvector==0.2.3
+
+# Data processing
+numpy>=1.24.0
+python-dotenv>=1.0.0
+
+# Embeddings (uncomment and configure as needed)
+# openai>=1.0.0  # If using OpenAI embeddings
+# sentence-transformers>=2.2.2  # If using local embeddings

@@ -28,8 +28,13 @@ from typing import TYPE_CHECKING
 # confirmation.models → django.conf → zproject.settings.
 if not TYPE_CHECKING:
     import django_stubs_ext
-
     django_stubs_ext.monkeypatch()
+
+# Import development settings
+try:
+    from zproject.dev_settings import *
+except ImportError:
+    pass
 
 from .configured_settings import *  # noqa: F403 isort: skip
 from .computed_settings import *  # noqa: F403 isort: skip

@@ -34,5 +34,30 @@ class ZerverConfig(AppConfig):
         # in any case, this is an intentionally unused import.
         import zerver.signals  # noqa: F401
 
+        # Initialize vector database updater
+        try:
+            from vector_db.utils.db_updater import VectorDBUpdater
+
+            # Initialize the updater in a separate thread to avoid blocking startup
+            import threading
+            def start_updater():
+                try:
+                    logging.info("Initializing vector database updater")
+                    updater = VectorDBUpdater()
+                    updater.update_vector_db()
+                    logging.info("Vector database initial update complete")
+                except Exception as e:
+                    logging.error(f"Error initializing vector database: {e}")
+            
+            # Start initial update in background thread
+            threading.Thread(
+                target=start_updater,
+                daemon=True,
+                name="vector-db-initial-update"
+            ).start()
+        except ImportError:
+            # Vector DB module might not be available, which is fine
+            pass
+
         if settings.POST_MIGRATION_CACHE_FLUSHING:
             post_migrate.connect(flush_cache, sender=self)

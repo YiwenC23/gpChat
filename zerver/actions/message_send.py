@@ -972,8 +972,8 @@ def do_send_messages(
                         if ai_enabled:
                             ai_agent = ZulipAIAgent(send_request.message.realm)
                             if ai_agent.is_healthy():
-                                # === 智能 AI 判斷系統 ===
-                                # 1. 先判斷 intent 和建議的 stream/topic
+                                # === AI Intent Classification System ===
+                                # 1. Analyze intent and suggest stream/topic
                                 intent_prompt = f"""Analyze the following message and classify it into one of these categories:
 
 1. POLL - User wants to create a voting poll with multiple options
@@ -981,17 +981,29 @@ def do_send_messages(
 3. STREAM_CREATE - User wants to create a new stream/channel for organizing discussions
 4. TOPIC_ORGANIZE - User wants to organize or categorize discussions into topics
 
+CRITICAL DISTINCTION:
+- STREAM_CREATE: User mentions "stream", "channel", "create", "new" or wants to create a new organizational space
+- TOPIC_ORGANIZE: User mentions "topic", "organize", "categorize" or wants to organize discussions within existing streams
+
+IMPORTANT: When the user mentions a specific stream name in their message, use that exact name!
+
 For each category, also suggest:
 - For POLL: What stream/topic would be appropriate
 - For QUESTION: What stream/topic would be appropriate  
-- For STREAM_CREATE: What stream name and description would be good
+- For STREAM_CREATE: Extract the exact stream name from the message, or suggest one
 - For TOPIC_ORGANIZE: What topic name would be appropriate
 
 Examples:
-- "最喜歡的程式語言" → POLL, stream: "general", topic: "程式語言討論"
-- "如何設定通知" → QUESTION, stream: "help", topic: "設定教學"
-- "建立一個專案討論區" → STREAM_CREATE, stream: "project-discussions", description: "專案相關討論"
-- "把這個歸類到技術問題" → TOPIC_ORGANIZE, topic: "技術問題"
+- "What's your favorite programming language?" → POLL, stream: "general", topic: "Programming Discussion"
+- "What should we have for lunch today?" → POLL, stream: "general", topic: "Lunch Discussion"
+- "What's your favorite movie genre?" → POLL, stream: "general", topic: "Movie Discussion"
+- "Choose the best meeting time" → POLL, stream: "general", topic: "Meeting Scheduling"
+- "How to set up notifications" → QUESTION, stream: "help", topic: "Setup Guide"
+- "Create a kos project discussion channel" → STREAM_CREATE, stream: "kos", description: "kos project related discussions"
+- "Create a test channel" → STREAM_CREATE, stream: "test", description: "test channel discussions"
+- "Create a dev topic" → TOPIC_ORGANIZE, topic: "dev", stream: "current_stream"
+- "Create a topic called dev" → TOPIC_ORGANIZE, topic: "dev", stream: "current_stream"
+- "Categorize this as technical issue" → TOPIC_ORGANIZE, topic: "Technical Issues"
 
 Reply in JSON format (no trailing commas):
 {{
@@ -1034,11 +1046,14 @@ Message: '{send_request.message.content}'"""
                                         except:
                                             # 備用關鍵字檢測
                                             content_lower = send_request.message.content.lower()
-                                            poll_keywords = ['最喜歡', '最愛', '投票', '選擇', '選哪個', '哪個比較好', '推薦', '建議']
-                                            stream_keywords = ['建立', '創建', '新增', '開設', 'stream', '頻道', '討論區']
-                                            topic_keywords = ['歸類', '分類', 'topic', '主題']
+                                            poll_keywords = ['favorite', 'best', 'vote', 'choose', 'which', 'recommend', 'suggest', 'poll']
+                                            stream_keywords = ['create', 'new', 'add', 'stream', 'channel']
+                                            topic_keywords = ['organize', 'categorize', 'topic', 'classify']
                                             
-                                            if any(keyword in content_lower for keyword in poll_keywords):
+                                            # Priority check for topic keywords, because "create a dev topic" should be identified as topic
+                                            if 'topic' in content_lower:
+                                                intent = 'topic_organize'
+                                            elif any(keyword in content_lower for keyword in poll_keywords):
                                                 intent = 'poll'
                                             elif any(keyword in content_lower for keyword in stream_keywords):
                                                 intent = 'stream_create'
@@ -1055,7 +1070,7 @@ Message: '{send_request.message.content}'"""
                                     
                                     # 處理不同的 intent
                                     if intent == 'poll':
-                                        # 2. poll prompt - 更明確的指令
+                                        # 2. Poll prompt - Clear instructions
                                         context = f"""You are an assistant in a team chat. The user wants to create a poll.
 
 CRITICAL: You must reply with EXACTLY this format (each line separately):
@@ -1072,12 +1087,21 @@ Rules:
 - No quotes around question or options
 - No extra text or explanations
 - Use line breaks between each option
+- Support both English questions
 
-Example for "最喜歡的程式語言":
-/poll 最喜歡的程式語言
+Examples:
+
+For "What's your favorite programming language?":
+/poll What's your favorite programming language?
 Python
 Java
 JavaScript
+
+For "What should we have for lunch today?":
+/poll What should we have for lunch today?
+Chinese food
+Western food
+Japanese food
 
 User message: '{send_request.message.content}'
 
@@ -1130,7 +1154,7 @@ Reply ONLY with the poll command (use line breaks):"""
                                                 logger.info(f"AI poll skipped: could not generate valid poll format")
                                     
                                     elif intent == 'question':
-                                        # 2. 問答 prompt - 更明確的指令
+                                        # 2. Q&A prompt - Clear instructions
                                         context = f"""You are a helpful assistant in Zulip. The user has asked a question.
 Please provide a concise and helpful answer.
 
@@ -1201,7 +1225,7 @@ User question: '{send_request.message.content}'"""
                                             )
                                     
                                     elif intent == 'topic_organize':
-                                        # 4. 歸類 topic - 只發送確認訊息，不重新發送原始訊息
+                                        # 4. 歸類 topic - 實際移動訊息到建議的 topic
                                         try:
                                             # 取得當前 stream
                                             current_stream = stream
@@ -1209,19 +1233,67 @@ User question: '{send_request.message.content}'"""
                                             # 建議的 topic
                                             new_topic = suggested_topic or "歸類討論"
                                             
-                                            # 發送確認訊息
-                                            response = f"✅ 建議將此訊息歸類到 topic: **{new_topic}**\n\n請手動將訊息移動到該 topic 或使用 `/move` 命令。"
+                                            # 由於我們在一個事務中，不能直接移動訊息
+                                            # 我們將移動操作延遲到事務完成後執行
+                                            from django.db import transaction
+                                            
+                                            def move_message_after_transaction():
+                                                try:
+                                                    from zerver.actions.message_edit import check_update_message
+                                                    
+                                                    # 嘗試移動訊息到新的 topic
+                                                    update_result = check_update_message(
+                                                        user_profile=sender,
+                                                        message_id=send_request.message.id,
+                                                        topic_name=new_topic,
+                                                        propagate_mode="change_one",
+                                                        send_notification_to_old_thread=False,
+                                                        send_notification_to_new_thread=True,
+                                                    )
+                                                    
+                                                    # 如果成功移動，發送確認訊息
+                                                    response = f"✅ 已成功將此訊息移動到 topic: **{new_topic}**"
+                                                    logger.info(f"Message {send_request.message.id} moved to topic: {new_topic}")
+                                                    
+                                                    # 發送確認訊息
+                                                    topic = send_request.message.topic_name() or "general"
+                                                    internal_send_stream_message(
+                                                        sender=get_system_bot(settings.WELCOME_BOT, send_request.message.realm.id),
+                                                        stream=current_stream,
+                                                        topic_name=topic,
+                                                        content=response,
+                                                    )
+                                                    
+                                                except Exception as move_error:
+                                                    # 如果移動失敗，發送建議訊息
+                                                    logger.warning(f"Failed to move message to topic {new_topic}: {move_error}")
+                                                    response = f"❌ 無法自動移動訊息到 topic: **{new_topic}**\n\n請手動將訊息移動到該 topic 或使用 `/move` 命令。\n\n錯誤: {str(move_error)}"
+                                                    
+                                                    topic = send_request.message.topic_name() or "general"
+                                                    internal_send_stream_message(
+                                                        sender=get_system_bot(settings.WELCOME_BOT, send_request.message.realm.id),
+                                                        stream=current_stream,
+                                                        topic_name=topic,
+                                                        content=response,
+                                                    )
+                                            
+                                            # 延遲執行移動操作
+                                            transaction.on_commit(move_message_after_transaction)
+                                            
+                                            # 發送臨時確認訊息
+                                            temp_response = f"🔄 正在將訊息移動到 topic: **{new_topic}**..."
                                             topic = send_request.message.topic_name() or "general"
                                             internal_send_stream_message(
                                                 sender=get_system_bot(settings.WELCOME_BOT, send_request.message.realm.id),
                                                 stream=current_stream,
                                                 topic_name=topic,
-                                                content=response,
+                                                content=temp_response,
                                             )
-                                            logger.info(f"Topic organization suggestion sent: {new_topic}")
+                                            logger.info(f"Topic organization scheduled for message {send_request.message.id} to topic: {new_topic}")
+                                            
                                         except Exception as e:
-                                            logger.error(f"Failed to send topic organization suggestion: {e}")
-                                            error_response = f"❌ 發送 topic 歸類建議時發生錯誤: {str(e)}"
+                                            logger.error(f"Failed to schedule topic organization: {e}")
+                                            error_response = f"❌ 發送 topic 歸類回應時發生錯誤: {str(e)}"
                                             topic = send_request.message.topic_name() or "general"
                                             internal_send_stream_message(
                                                 sender=get_system_bot(settings.WELCOME_BOT, send_request.message.realm.id),

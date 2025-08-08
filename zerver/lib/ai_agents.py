@@ -1,6 +1,6 @@
 ﻿"""
 Zulip AI Agents Integration Library
-Provides interface between Zulip and local Ollama AI models
+Provides interface between Zulip and local Ollama AI models with vector database integration
 """
 import json
 import logging
@@ -12,6 +12,8 @@ from django.conf import settings
 import textwrap
 
 from zerver.models import Realm, UserProfile
+from vector_db.core.vector_store import VectorStore
+from vector_db.models.document import Document
 
 
 logger = logging.getLogger(__name__)
@@ -174,13 +176,19 @@ class OllamaClient:
 
 
 class ZulipAIAgent:
-    """High-level AI agent for Zulip integration"""
+    """High-level AI agent for Zulip integration with vector database support"""
 
     def __init__(self, realm: Realm):
         self.realm = realm
         self.ollama = OllamaClient(getattr(settings, "OLLAMA_BASE_URL", "http://localhost:11434"))
         self.default_model = getattr(settings, "AI_AGENTS_DEFAULT_MODEL", "llama3.1:8b")
         self.embedding_model = getattr(settings, "AI_AGENTS_EMBEDDING_MODEL", "nomic-embed-text:v1.5")
+        
+        # Initialize vector store for context retrieval
+        # Use 768 dimensions for Ollama embeddings
+        self.vector_store = VectorStore(embedding_dimension=768)
+        self.context_limit = getattr(settings, "AI_AGENTS_CONTEXT_LIMIT", 5)
+        self.context_threshold = getattr(settings, "AI_AGENTS_CONTEXT_THRESHOLD", 0.6)
 
     def chat(
         self,
@@ -188,29 +196,143 @@ class ZulipAIAgent:
         user: UserProfile,
         context: Optional[str] = None,
         agent_type: str = "general",
+        use_vector_context: bool = True,
     ) -> str:
-        """Generate chat response using AI agent"""
+        """Generate chat response using AI agent with vector database context"""
 
         # Build system prompt based on agent type
         system_prompt = self._get_system_prompt(agent_type, user)
 
-        # Add context if provided
+        # Get vector database context if enabled
+        vector_context = ""
+        if use_vector_context:
+            vector_context = self._get_vector_context(message, user)
+
+        # Combine all context
+        combined_context = ""
         if context:
-            prompt = f"Context: {context}\n\nUser: {message}\nAssistant:"
+            combined_context += f"User Context: {context}\n\n"
+        if vector_context:
+            combined_context += f"Similar Messages Context:\n{vector_context}\n\n"
+
+        # Build final prompt
+        if combined_context:
+            prompt = f"{combined_context}User: {message}\nAssistant:"
         else:
             prompt = f"User: {message}\nAssistant:"
 
         try:
+            # For welcome_bot, always use vector context and store messages
+            if agent_type == "welcome_bot":
+                # Store the user message in vector DB for future context
+                self.store_message_in_vector_db(
+                    message_content=message,
+                    metadata={
+                        "sender": user.email,
+                        "realm": self.realm.string_id,
+                        "agent_type": agent_type,
+                        "timestamp": str(time.time()),
+                        "user_name": user.full_name
+                    }
+                )
+                
+                # Force enable vector context for welcome_bot and enhance it
+                if not vector_context and use_vector_context:
+                    vector_context = self._get_vector_context(message, user)
+                    if vector_context:
+                        combined_context = f"Similar Messages Context:\n{vector_context}\n\n"
+                        prompt = f"{combined_context}User: {message}\nAssistant:"
+                
+                # Add enhanced system prompt for welcome bot with vector context awareness
+                if vector_context:
+                    system_prompt += f"""
+
+IMPORTANT: You have access to similar messages from the vector database. Use this context to:
+1. Provide more relevant and personalized responses
+2. Reference similar discussions or questions that have been asked before
+3. Build upon existing conversations in the organization
+4. Show understanding of the organization's communication patterns
+
+The similar messages context above shows relevant conversations that may help you provide a better response.
+"""
+
             response = self.ollama.generate(
                 model=self.default_model,
                 prompt=prompt,
                 system=system_prompt,
                 temperature=0.7,
             )
+            
+            # Store bot response in vector DB for future context
+            if agent_type == "welcome_bot":
+                self.store_message_in_vector_db(
+                    message_content=response.strip(),
+                    metadata={
+                        "sender": "welcome-bot@zulip.com",
+                        "realm": self.realm.string_id,
+                        "agent_type": agent_type,
+                        "timestamp": str(time.time()),
+                        "bot_response": True,
+                        "user_name": user.full_name
+                    }
+                )
+            
             return response.strip()
         except Exception as e:
             logger.error(f"AI chat generation failed for realm {self.realm.id}: {e}")
             return "I apologize, but I'm experiencing technical difficulties. Please try again later."
+
+    def _get_vector_context(self, message: str, user: UserProfile) -> str:
+        """Get relevant context from vector database"""
+        try:
+            # Search for similar messages in vector database
+            similar_messages = self.vector_store.search_by_text(
+                "zulip_messages",
+                message,
+                limit=self.context_limit,
+                threshold=self.context_threshold
+            )
+            
+            if not similar_messages:
+                return ""
+            
+            # Format context from similar messages with enhanced information
+            context_parts = []
+            for msg in similar_messages:
+                sender = msg.get('metadata', {}).get('sender', 'Unknown')
+                subject = msg.get('metadata', {}).get('subject', 'No subject')
+                content = msg.get('content', '')
+                similarity = msg.get('similarity_score', 0)
+                user_name = msg.get('metadata', {}).get('user_name', 'Unknown User')
+                is_bot_response = msg.get('metadata', {}).get('bot_response', False)
+                
+                # Skip bot responses with low similarity to avoid echo
+                if is_bot_response and similarity < 0.8:
+                    continue
+                
+                # Format the context entry
+                if is_bot_response:
+                    context_parts.append(
+                        f"Previous bot response (similarity: {similarity:.2f}):\n"
+                        f"To: {user_name}\n"
+                        f"Content: {content[:300]}...\n"
+                    )
+                else:
+                    context_parts.append(
+                        f"Similar user message (similarity: {similarity:.2f}):\n"
+                        f"From: {user_name} ({sender})\n"
+                        f"Subject: {subject}\n"
+                        f"Content: {content[:300]}...\n"
+                    )
+            
+            if context_parts:
+                return "\n".join(context_parts)
+            else:
+                return ""
+            
+        except Exception as e:
+            logger.error(f"Failed to get vector context: {e}")
+            return ""
 
     def _get_system_prompt(self, agent_type: str, user: UserProfile) -> str:
         """Get system prompt based on agent type"""
@@ -218,8 +340,19 @@ class ZulipAIAgent:
             You are a helpful AI assistant integrated into Zulip, a team collaboration platform. \
             You are helping user {user.full_name} in the {self.realm.name} organization. \
             Be helpful, accurate, and concise in your responses.
+            
+            When provided with similar message context, use it to provide more relevant and contextual responses. \
+            Reference the context when appropriate to show understanding of the conversation history.
         """)
-        return base_prompt + "\nYou are a general-purpose assistant."
+        
+        if agent_type == "general":
+            return base_prompt + "\nYou are a general-purpose assistant."
+        elif agent_type == "code":
+            return base_prompt + "\nYou are a coding assistant. Provide clear, well-documented code examples."
+        elif agent_type == "writing":
+            return base_prompt + "\nYou are a writing assistant. Help with grammar, style, and content improvement."
+        else:
+            return base_prompt + f"\nYou are a {agent_type} assistant."
 
     def generate_embeddings(self, text: str) -> List[float]:
         """Generate embeddings for text similarity/search"""
@@ -241,6 +374,37 @@ class ZulipAIAgent:
     def is_healthy(self) -> bool:
         """Check if AI agents system is operational"""
         return self.ollama.health_check()
+
+    def store_message_in_vector_db(self, message_content: str, metadata: Dict[str, Any]) -> bool:
+        """Store a message in the vector database for future context retrieval"""
+        try:
+            # Generate embedding
+            embedding = self.generate_embeddings(message_content)
+            if not embedding:
+                return False
+            
+            # Create document
+            doc = Document(
+                content=message_content,
+                embedding=embedding,
+                metadata=metadata
+            )
+            
+            # Store in vector database
+            self.vector_store.insert("zulip_messages", doc.content, doc.embedding, doc.metadata)
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to store message in vector DB: {e}")
+            return False
+
+    def search_similar_messages(self, query: str, limit: int = 5) -> List[Dict[str, Any]]:
+        """Search for similar messages in the vector database"""
+        try:
+            return self.vector_store.search_by_text("zulip_messages", query, limit=limit)
+        except Exception as e:
+            logger.error(f"Failed to search similar messages: {e}")
+            return []
 
 
 # Singleton instance for the default Ollama client

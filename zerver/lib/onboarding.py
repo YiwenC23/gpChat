@@ -245,6 +245,7 @@ def send_welcome_bot_response(send_request: SendMessageRequest) -> None:
                 2. Answer questions about Zulip features
                 3. Provide helpful guidance for getting started
                 4. Be friendly and welcoming
+                5. Use vector database context to provide more relevant responses
                 
                 The user's message is: "{send_request.message.content}"
                 
@@ -259,16 +260,25 @@ def send_welcome_bot_response(send_request: SendMessageRequest) -> None:
                 - "keyboard shortcuts" - Navigation shortcuts
                 - "formatting" - Message formatting options
                 
+                IMPORTANT: You have access to a vector database with similar messages and conversations.
+                Use this context to provide more personalized and relevant responses based on the organization's
+                communication patterns and previous discussions.
+                
                 Keep your responses concise, helpful, and welcoming.
                 """
                 
+                # Configure AI agent with welcome bot specific settings
+                ai_agent.context_limit = getattr(settings, "WELCOME_BOT_VECTOR_CONTEXT_LIMIT", 3)
+                ai_agent.context_threshold = getattr(settings, "WELCOME_BOT_VECTOR_THRESHOLD", 0.5)
+                
                 # Generate AI response
-                logger.info("Generating AI response...")
+                logger.info("Generating AI response with vector database context...")
                 ai_response = ai_agent.chat(
                     message=send_request.message.content,
                     user=send_request.message.sender,
                     context=context,
                     agent_type="welcome_bot",
+                    use_vector_context=getattr(settings, "WELCOME_BOT_USE_VECTOR_DB", True),
                 )
                 logger.info(f"AI response received: {ai_response[:100]}...")
                 

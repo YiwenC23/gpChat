@@ -745,6 +745,11 @@ AI_AGENTS_CODE_MODEL: str = "llama3.1:8b"
 AI_AGENTS_ENABLE_CHAT: bool = True
 AI_AGENTS_ENABLE_EMBEDDINGS: bool = True
 
+# Welcome Bot specific settings
+WELCOME_BOT_USE_VECTOR_DB: bool = True
+WELCOME_BOT_VECTOR_CONTEXT_LIMIT: int = 3
+WELCOME_BOT_VECTOR_THRESHOLD: float = 0.5
+
 # Usage limits and performance
 AI_AGENTS_MAX_REQUESTS_PER_USER_PER_DAY: int = 100
 AI_AGENTS_MAX_CONTEXT_LENGTH: int = 4096
@@ -752,6 +757,10 @@ AI_AGENTS_MAX_MESSAGE_LENGTH: int = 5000
 AI_AGENTS_MAX_EMBEDDING_TEXT_LENGTH: int = 10000
 AI_AGENTS_DEFAULT_TEMPERATURE: float = 0.7
 AI_AGENTS_DEFAULT_TOP_P: float = 0.9
+
+# Vector database context settings
+AI_AGENTS_CONTEXT_LIMIT: int = 5
+AI_AGENTS_CONTEXT_THRESHOLD: float = 0.6
 
 # Model management
 AI_AGENTS_AUTO_DOWNLOAD_MODELS: bool = True
@@ -762,6 +771,21 @@ AI_AGENTS_MAX_MODEL_SIZE_GB: int = 50
 AI_AGENTS_LOG_INTERACTIONS: bool = True
 AI_AGENTS_RETAIN_LOGS_DAYS: int = 90
 AI_AGENTS_ALLOW_CUSTOM_MODELS: bool = False
+
+# Vector Database Configuration
+# Enable/disable vector database functionality
+VECTOR_DB_ENABLED: bool = True
+
+# Vector database settings
+VECTOR_DB_EMBEDDING_DIMENSION: int = 1536
+VECTOR_DB_TABLE_NAME: str = "zulip_messages"
+VECTOR_DB_BATCH_SIZE: int = 100
+VECTOR_DB_LOOKBACK_DAYS: int = 1
+
+# Vector database update settings
+VECTOR_DB_AUTO_UPDATE: bool = True
+VECTOR_DB_UPDATE_INTERVAL_SECONDS: int = 3600
+VECTOR_DB_ENABLE_BACKGROUND_UPDATES: bool = True
 
 # URL of the navigation tour video displayed to new users.
 # Set it to None to disable it.

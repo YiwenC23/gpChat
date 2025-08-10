@@ -11,8 +11,8 @@ Vagrant.configure("2") do |config|
   ollama_port = 11434 # ollama port forward
 
   # System settings for the virtual machine.
-  vm_num_cpus = "8"
-  vm_memory = "16384"
+  vm_num_cpus = "2"
+  vm_memory = "2408"
 
   ubuntu_mirror = ""
   vboxadd_version = nil

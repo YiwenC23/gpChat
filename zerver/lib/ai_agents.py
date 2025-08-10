@@ -4,173 +4,19 @@ Provides interface between Zulip and local Ollama AI models
 """
 import json
 import logging
+import re
 import time
-from typing import Any, Dict, Iterator, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple
 
-import requests
 from django.conf import settings
 import textwrap
 
+from zerver.lib.ollama_client import OllamaClient, OllamaGenerateResponse
+from zerver.lib.ai_agent_tools import Tool, ToolResult, get_available_tools
 from zerver.models import Realm, UserProfile
 
 
 logger = logging.getLogger(__name__)
-
-
-class OllamaConnectionError(Exception):
-    """Raised when connection to Ollama fails"""
-    pass
-
-
-class OllamaModelError(Exception):
-    """Raised when model operations fail"""
-    pass
-
-class OllamaClient:
-    """Client for interacting with local Ollama installation"""
-
-    def __init__(self, base_url: str = "http://localhost:11434"):
-        self.base_url = base_url.rstrip("/")
-        self.session = requests.Session()
-
-    def _make_request(self, method: str, endpoint: str, **kwargs) -> requests.Response:
-        """Make HTTP request to Ollama API with error handling"""
-        url = f"{self.base_url}/api/{endpoint}"
-        
-        # For generate requests, disable timeout.
-        if endpoint == "generate":
-            kwargs["timeout"] = 3000000  # or set to a very high value
-
-        try:
-            # Log the request details for debugging (only in debug mode)
-            if "json" in kwargs and logger.isEnabledFor(logging.DEBUG):
-                logger.debug(f"Making {method} request to {url} with payload: {kwargs['json']}")
-            response = self.session.request(method, url, **kwargs)
-            response.raise_for_status()
-            return response
-        
-        
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Ollama API request failed: {e}")
-            # Try to get more details from the response
-            if hasattr(e, "response") and e.response is not None:
-                try:
-                    error_detail = e.response.json()
-                    logger.error(f"Error response: {error_detail}")
-                    # Check for specific error types
-                    if "error" in error_detail:
-                        error_msg = error_detail["error"]
-                        if "requires more system memory" in error_msg:
-                            raise OllamaModelError(f"Insufficient memory: {error_msg}")
-                except:
-                    logger.error(f"Error response text: {e.response.text}")
-            raise OllamaConnectionError(f"Failed to connect to Ollama: {e}")
-
-    def generate(
-        self,
-        model: str,
-        prompt: str,
-        system: Optional[str] = None,
-        context: Optional[List[int]] = None,
-        temperature: float = 0.7,
-        stream: bool = False,
-    ) -> Union[str, Iterator[str]]:
-        """Generate text using specified model"""
-        payload = {
-            "model": model,
-            "prompt": prompt,
-            "stream": stream,
-            "options": {
-                "temperature": temperature,
-            }
-        }
-
-        if system:
-            payload["system"] = system
-        if context:
-            payload["context"] = context
-
-        try:
-            response = self._make_request("POST", "generate", json=payload)
-
-            if stream:
-                # Return streaming response
-                return self._stream_response(response)
-            else:
-                # Return complete response
-                result = response.json()
-                return result.get("response", "")
-        except Exception as e:
-            logger.error(f"Text generation failed: {e}")
-            raise OllamaModelError(f"Generation failed: {e}")
-
-    def _stream_response(self, response: requests.Response):
-        """Handle streaming response from Ollama"""
-        for line in response.iter_lines():
-            if line:
-                try:
-                    data = json.loads(line)
-                    if "response" in data:
-                        yield data["response"]
-                    if data.get("done"):
-                        break
-                except json.JSONDecodeError:
-                    continue
-
-    def embed(self, model: str, text: str) -> List[float]:
-        """Generate embeddings for text"""
-        payload = {
-            "model": model,
-            "prompt": text,
-        }
-
-        try:
-            response = self._make_request("POST", "embeddings", json=payload)
-            result = response.json()
-            return result.get("embedding", [])
-        except Exception as e:
-            logger.error(f"Embedding generation failed: {e}")
-            raise OllamaModelError(f"Embedding failed: {e}")
-
-    def list_models(self) -> List[Dict[str, Any]]:
-        """List available models"""
-        try:
-            response = self._make_request("GET", "tags")
-            result = response.json()
-            return result.get("models", [])
-        except Exception as e:
-            logger.error(f"Failed to list models: {e}")
-            return []
-
-    def pull_model(self, model: str) -> bool:
-        """Download a model"""
-        payload = {"name": model}
-
-        try:
-            response = self._make_request("POST", "pull", json=payload, timeout=3600)
-            return response.status_code == 200
-        except Exception as e:
-            logger.error(f"Failed to pull model {model}: {e}")
-            return False
-
-    def delete_model(self, model: str) -> bool:
-        """Delete a model"""
-        payload = {"name": model}
-
-        try:
-            response = self._make_request("DELETE", "delete", json=payload)
-            return response.status_code == 200
-        except Exception as e:
-            logger.error(f"Failed to delete model {model}: {e}")
-            return False
-
-    def health_check(self) -> bool:
-        """Check if Ollama service is healthy"""
-        try:
-            self._make_request("GET", "tags")
-            return True
-        except Exception:
-            return False
 
 
 class ZulipAIAgent:
@@ -181,18 +27,23 @@ class ZulipAIAgent:
         self.ollama = OllamaClient(getattr(settings, "OLLAMA_BASE_URL", "http://localhost:11434"))
         self.default_model = getattr(settings, "AI_AGENTS_DEFAULT_MODEL", "llama3.1:8b")
         self.embedding_model = getattr(settings, "AI_AGENTS_EMBEDDING_MODEL", "nomic-embed-text:v1.5")
+        self.keep_alive = getattr(settings, "AI_AGENTS_KEEP_ALIVE", "10m")  # Keep model in memory for 10 minutes
 
     def chat(
         self,
         message: str,
         user: UserProfile,
         context: Optional[str] = None,
-        agent_type: str = "general",
-    ) -> str:
-        """Generate chat response using AI agent"""
+    ) -> Dict[str, Any]:
+        """Generate chat response using AI agent
 
-        # Build system prompt based on agent type
-        system_prompt = self._get_system_prompt(agent_type, user)
+        Returns dict with:
+        - response: The AI response text
+        - tokens: Token usage information
+        - conversation_history: Full conversation history
+        """
+
+        system_prompt = self._get_system_prompt(user)
 
         # Add context if provided
         if context:
@@ -201,25 +52,128 @@ class ZulipAIAgent:
             prompt = f"User: {message}\nAssistant:"
 
         try:
-            response = self.ollama.generate(
+            # Import StreamingResponse for type checking
+            from zerver.lib.ollama_client import StreamingResponse
+
+            # Generate response using streaming (new default)
+            result = self.ollama.generate(
                 model=self.default_model,
                 prompt=prompt,
                 system=system_prompt,
                 temperature=0.7,
+                keep_alive=self.keep_alive  # Keep model in memory
             )
-            return response.strip()
+
+            # Handle StreamingResponse (new default behavior)
+            if isinstance(result, StreamingResponse):
+                # Iterate through the stream to build the complete response
+                response_text = ""
+                for chunk in result:
+                    response_text += chunk
+
+                # Token counts are now available after streaming completes
+                response_text = response_text.strip()
+                token_usage = result.token_usage
+
+            # Handle non-streaming response (when explicitly stream=False is used)
+            elif isinstance(result, OllamaGenerateResponse):
+                response_text = result.response.strip()
+                token_usage = result.token_usage
+            else:
+                # Fallback for backward compatibility
+                response_text = result.strip() if isinstance(result, str) else ""
+                # Estimate token usage if not available
+                prompt_tokens = len(prompt.split()) * 1.3  # Rough estimate
+                completion_tokens = len(response_text.split()) * 1.3
+                token_usage = {
+                    "prompt_tokens": int(prompt_tokens),
+                    "completion_tokens": int(completion_tokens),
+                    "total_tokens": int(prompt_tokens + completion_tokens)
+                }
+
+            # Build conversation history
+            conversation_history = [
+                {"role": "user", "content": message},
+                {"role": "assistant", "content": response_text}
+            ]
+
+            return {
+                "response": response_text,
+                "tokens": token_usage,
+                "conversation_history": conversation_history,
+            }
         except Exception as e:
             logger.error(f"AI chat generation failed for realm {self.realm.id}: {e}")
-            return "I apologize, but I'm experiencing technical difficulties. Please try again later."
+            return {
+                "response": "I apologize, but I'm experiencing technical difficulties. Please try again later.",
+                "tokens": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+                "conversation_history": [],
+            }
 
-    def _get_system_prompt(self, agent_type: str, user: UserProfile) -> str:
+    def _get_system_prompt(self, user: UserProfile) -> str:
         """Get system prompt based on agent type"""
         base_prompt = textwrap.dedent(f"""
-            You are a helpful AI assistant integrated into Zulip, a team collaboration platform. \
-            You are helping user {user.full_name} in the {self.realm.name} organization. \
-            Be helpful, accurate, and concise in your responses.
+            # Role: Helpful AI Assistant with Reasoning
+
+            ## Background: Group Chat Platform
+            - You are an AI assistant integrated into Zulip, a group chat platform for the {self.realm.name} organization.
+            - Your purpose is to provide thoughtful, well-reasoned support to users.
+
+            ## Core Directive: Think, then Respond
+            Your primary directive is to reason about a user's request before providing an answer. You must externalize this reasoning process.
+
+            ## Reasoning Workflow:
+            1. **Analyze the Request**: Deeply understand the user's question or task. Identify the core problem, constraints, and any implicit needs.
+            2. **Think Step-by-Step**: Before generating a final answer, formulate a plan. Break down the problem, consider different angles, and gather your thoughts.
+            3. **Externalize Your Thoughts**: **You MUST enclose this entire reasoning process within `<Reasoning>` and `</Reasoning>` tags.** This is your internal monologue made visible, showing how you arrive at the answer.
+            4. **Formulate the Final Answer**: After your thinking process, provide a clear, concise, and helpful response to the user. This final answer must be outside the `<Reasoning>` and `</Reasoning>` tags.
+
+            ## Example Response Structure:
+            <Reasoning>
+            The user is asking for a summary of a long document.
+            1. First, I need to identify the key sections of the document.
+            2. Then, I will extract the main points from each section.
+            3. Finally, I will synthesize these points into a concise summary.
+            This will ensure the summary is comprehensive yet easy to understand.
+            </Reasoning>
+
+            Here is a summary of the document:
+            ... (Your final, user-facing answer) ...
+
+            ## Profile:
+            - Author: Helpful AI Assistant (a part of the Zulip platform integration)
+            - Version: Current version integrated into {self.realm.name} organization
+            - Description: General-purpose assistant with reasoning capabilities in various domains
+
+            ### Skills:
+            - Support query understanding and response generation for users within the {self.realm.name} organization.
+            - Assist in answering a wide range of questions related to technology, productivity, best practices, and company policies.
+            - Provide general information and direct users who need more specialized assistance to authorized resources.
+            - Apply structured reasoning to complex problems.
+
+            ## Goals:
+            - Enhance user experience by providing precise, well-reasoned responses.
+            - Make reasoning transparent to build trust and understanding.
+            - Promote smooth operation, learning, and issue resolution within {self.realm.name}.
+
+            ## Constraints:
+            - Always follow the "Think, then Respond" workflow.
+            - The `<Reasoning>` block is mandatory for every response.
+            - Ground your answers in facts and best practices relevant to the {self.realm.name} organization.
+            - Balance clarity with appropriate detail: Be concise for simple queries, but provide thorough explanations for complex topics.
+            - Adapt response length to match the complexity and depth of the user's question.
+            - Keep responses engaging without resorting to overly formal language.
+
+            ## Workflow:
+            1. Analyze the support request or question from a user within {self.realm.name}.
+            2. Enter a `<Reasoning>` block to reason through the problem step-by-step.
+            3. Exit the `<Reasoning>` block and provide a clear, actionable response.
+            4. Deliver suggestions in a structured format (e.g., text, markdown) to ease understanding.
+
+            ## Initialization:
+            Welcome! I am ready to assist. Please let me know what you need, and I'll think through your request carefully.
         """)
-        return base_prompt + "\nYou are a general-purpose assistant."
+        return base_prompt
 
     def generate_embeddings(self, text: str) -> List[float]:
         """Generate embeddings for text similarity/search"""
@@ -228,31 +182,6 @@ class ZulipAIAgent:
         except Exception as e:
             logger.error(f"Embedding generation failed: {e}")
             return []
-    
-    def _format_messages_for_ai(self, messages: List[Dict[str, Any]]) -> str:
-        """Format Zulip messages for AI processing"""
-        formatted = []
-        for msg in messages:
-            sender = msg.get("sender_full_name", "Unknown")
-            content = msg.get("content", "")
-            formatted.append(f"{sender}: {content}")
-        return "\n".join(formatted)
-
-    def is_healthy(self) -> bool:
-        """Check if AI agents system is operational"""
-        return self.ollama.health_check()
-
-
-# Singleton instance for the default Ollama client
-_default_ollama_client: Optional[OllamaClient] = None
-
-
-def get_ollama_client() -> OllamaClient:
-    """Get singleton Ollama client instance"""
-    global _default_ollama_client
-    if _default_ollama_client is None:
-        _default_ollama_client = OllamaClient()
-    return _default_ollama_client
 
 
 def get_ai_agent(realm: Realm) -> ZulipAIAgent:

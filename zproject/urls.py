@@ -91,6 +91,13 @@ from zerver.views.message_flags import (
 from zerver.views.message_report import report_message_backend
 from zerver.views.message_send import render_message_backend, send_message_backend, zcommand_backend
 from zerver.views.message_summary import get_messages_summary
+from zerver.views.ai_agents import (
+    chat_with_ai_agent,
+    generate_embeddings,
+    get_ai_agent_config,
+    get_ai_interaction_history,
+    list_ai_models,
+)
 from zerver.views.muted_users import mute_user, unmute_user
 from zerver.views.navigation_views import (
     add_navigation_view,
@@ -411,6 +418,42 @@ v1_api_and_json_patterns = [
         GET=(
             get_messages_summary,
             # Not documented since the API details haven't been finalized yet.
+            {"intentionally_undocumented"},
+        ),
+    ),
+    # AI Agents endpoints
+    rest_path(
+        "ai/chat",
+        POST=(
+            chat_with_ai_agent,
+            {"intentionally_undocumented"},
+        ),
+    ),
+    rest_path(
+        "ai/embeddings",
+        POST=(
+            generate_embeddings,
+            {"intentionally_undocumented"},
+        ),
+    ),
+    rest_path(
+        "ai/models",
+        GET=(
+            list_ai_models,
+            {"intentionally_undocumented"},
+        ),
+    ),
+    rest_path(
+        "ai/config",
+        GET=(
+            get_ai_agent_config,
+            {"intentionally_undocumented"},
+        ),
+    ),
+    rest_path(
+        "ai/history",
+        GET=(
+            get_ai_interaction_history,
             {"intentionally_undocumented"},
         ),
     ),

@@ -15,6 +15,7 @@ from zerver.actions.realm_settings import (
     do_deactivate_realm,
 )
 from zerver.lib.bulk_create import create_users
+from zerver.lib.agent_provision import provision_ai_agent_for_realm
 from zerver.lib.push_notifications import sends_notifications_directly
 from zerver.lib.remote_server import maybe_enqueue_audit_log_upload
 from zerver.lib.server_initialization import create_internal_realm, server_initialized
@@ -362,4 +363,14 @@ def do_create_realm(
         billing_session.send_realm_created_internal_admin_message()
 
     setup_realm_internal_bots(realm)
+
+    # Provision AI agent for the new realm
+    # This is done after all other realm setup to ensure everything is ready
+    try:
+        provision_ai_agent_for_realm(realm)
+        logging.info(f"AI agent provisioned for realm {realm.string_id}")
+    except Exception as e:
+        # Don't fail realm creation if AI agent provisioning fails
+        logging.error(f"Failed to provision AI agent for realm {realm.string_id}: {e}")
+
     return realm

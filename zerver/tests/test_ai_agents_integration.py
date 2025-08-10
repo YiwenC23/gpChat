@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 AI Agents Integration Test Script
 
@@ -11,22 +11,15 @@ Note*: To login to the django shell, to go development environment and run: "./m
 import time
 from typing import Any, List
 
-import orjson
 from django.conf import settings
 from django.utils.timezone import now as timezone_now
+import orjson
 
-from zerver.lib.ai_agents import OllamaClient, get_ai_agent
+from zerver.lib.ai_agents import get_ai_agent
+from zerver.lib.ollama_client import OllamaClient, OllamaGenerateResponse, StreamingResponse
+from zerver.models import UserProfile
+from zerver.actions.message_summary import zulip_messages
 from zerver.lib.narrow import NarrowParameter
-from zerver.models import UserProfile
-from zerver.lib.message import messages_for_ids
-from zerver.lib.narrow import (
-    LARGER_THAN_MAX_MESSAGE_ID,
-    NarrowParameter,
-    clean_narrow_for_message_fetch,
-    fetch_messages,
-)
-from zerver.models import UserProfile
-from zerver.models.realms import MessageEditHistoryVisibilityPolicyEnum
 
 # Test timing globals
 ai_test_start = 0.0
@@ -40,11 +33,14 @@ def ai_test_start_timer() -> None:
     ai_test_start = time.time()
 
 
-def ai_test_finish_timer() -> None:
+def ai_test_finish_timer(start_time=None) -> float:
     """Finish timing for AI request"""
     global ai_test_total_time, ai_test_total_requests, ai_test_start
     ai_test_total_requests += 1
-    elapsed_time = time.time() - ai_test_start
+    if start_time is not None:
+        elapsed_time = time.time() - start_time
+    else:
+        elapsed_time = time.time() - ai_test_start
     ai_test_total_time += elapsed_time
     return elapsed_time  # Return elapsed time for individual request timing
 
@@ -54,80 +50,6 @@ def print_separator(title: str) -> None:
     print(f"\n{'=' * 80}")
     print(f" {title}")
     print(f"{'=' * 80}\n")
-
-
-def format_zulip_messages_for_model(zulip_messages: list[dict[str, Any]]) -> str:
-    zulip_messages_list = [
-        {"sender": message["sender_full_name"], "content": message["content"]}
-        for message in zulip_messages
-    ]
-    return orjson.dumps(zulip_messages_list, option=orjson.OPT_INDENT_2).decode()
-
-
-def zulip_messages(
-    user_profile: UserProfile,
-    narrow: list[NarrowParameter] | None,
-) -> list[dict[str, Any]] | None:
-
-    narrow = clean_narrow_for_message_fetch(narrow, user_profile.realm, user_profile)
-    query_info = fetch_messages(
-        narrow=narrow,
-        user_profile=user_profile,
-        realm=user_profile.realm,
-        is_web_public_query=False,
-        anchor=LARGER_THAN_MAX_MESSAGE_ID,
-        include_anchor=True,
-        num_before=100,
-        num_after=0,
-    )
-
-    if len(query_info.rows) == 0:  # nocoverage
-        return None
-
-    result_message_ids: list[int] = []
-    user_message_flags: dict[int, list[str]] = {}
-    for row in query_info.rows:
-        message_id = row[0]
-        result_message_ids.append(message_id)
-        # We skip populating flags, since they would be ignored below anyway.
-        user_message_flags[message_id] = []
-
-    message_list = messages_for_ids(
-        message_ids=result_message_ids,
-        user_message_flags=user_message_flags,
-        search_fields={},
-        # We currently prefer the plain-text content of messages to
-        apply_markdown=False,
-        # Avoid wasting resources computing gravatars.
-        client_gravatar=True,
-        allow_empty_topic_name=False,
-        # Avoid fetching edit history, which won't be passed to the model.
-        message_edit_history_visibility_policy=MessageEditHistoryVisibilityPolicyEnum.none.value,
-        user_profile=user_profile,
-        realm=user_profile.realm,
-    )
-
-    return message_list
-
-def format_zulip_messages(messages: list[dict[str, Any]], narrow: list[NarrowParameter] | None = None) -> str:
-    intro = "The following is a chat conversation in the Zulip team chat app."
-    topic: str | None = None
-    channel: str | None = None
-    if narrow and len(narrow) == 2:
-        for term in narrow:
-            assert not term.negated
-            if term.operator == "channel":
-                channel = term.operand
-            if term.operator == "topic":
-                topic = term.operand
-    if channel:
-        intro += f" channel: {channel}"
-    if topic:
-        intro += f", topic: {topic}"
-
-    formatted_conversation = format_zulip_messages_for_model(messages)
-    return formatted_conversation
-
 
 
 def test_ollama_connection() -> bool:
@@ -172,29 +94,65 @@ def test_ollama_connection() -> bool:
         return False
 
 
-def test_chat_generation(client: OllamaClient, test_messages: List[str]) -> None:
+def test_chat_generation(test_messages: List[str]) -> None:
     """Test chat generation with different prompts"""
-    print_separator("Testing Chat Generation")
+    print_separator("Testing Chat Generation with Token Counts (Using ZulipAIAgent)")
+
+    # Get the test user and realm to instantiate the agent
+    try:
+        user_profile = UserProfile.objects.get(email="user11@zulipdev.com")
+        realm = user_profile.realm
+        agent = get_ai_agent(realm)
+        print(f"🤖 Using agent for realm: {realm.name}")
+    except UserProfile.DoesNotExist:
+        print("❌ Test user not found. Skipping chat generation test.")
+        return
 
     default_model = getattr(settings, "AI_AGENTS_DEFAULT_MODEL", "llama3.1:8b")
     print(f"🤖 Using model: {default_model}")
+    print("📡 Using ZulipAIAgent with reasoning capabilities")
 
     for i, message in enumerate(test_messages, 1):
         print(f"\n--- Test Chat {i} ---")
         print(f"👤 User: {message}")
+        print("🤔 Reasoning...")
 
         try:
-            ai_test_start_timer()
-            response = client.generate(
-                model=default_model,
-                prompt=message,
-                temperature=0.7,
-                stream=False
-            )
-            elapsed_time = ai_test_finish_timer()
+            # Start timing BEFORE calling chat to capture full end-to-end time
+            end_to_end_start = time.time()
 
-            print(f"🤖 AI: {response}")
-            print(f"⏱️  Response time: {elapsed_time:.2f}s")
+            # Use the agent's chat method instead of the raw client
+            result = agent.chat(message=message, user=user_profile)
+
+            response_text = result["response"]
+            token_usage = result["tokens"]
+
+            # Calculate end-to-end time
+            end_to_end_time = time.time() - end_to_end_start
+
+            # Display the complete response
+            print(f"\n🤖 AI Response:")
+            print(f"{response_text}")
+
+            # Show response statistics
+            print(f"\n📦 Response Statistics:")
+            print(f"   - Response length: {len(response_text)} characters")
+            print(f"   - Response time: {end_to_end_time:.2f}s")
+
+            # Display the token counts
+            print(f"\n📊 Token Counts:")
+            print(f"   - Prompt tokens: {token_usage.get('prompt_tokens', 0)}")
+            print(f"   - Completion tokens: {token_usage.get('completion_tokens', 0)}")
+            print(f"   - Total tokens: {token_usage.get('total_tokens', 0)}")
+
+            if token_usage.get('total_tokens', 0) > 0 and end_to_end_time > 0:
+                tokens_per_sec = token_usage['total_tokens'] / end_to_end_time
+                print(f"   - Tokens per second: {tokens_per_sec:.1f}")
+
+            print(f"⏱️  Total response time: {end_to_end_time:.2f}s")
+
+            # Track timing for summary
+            ai_test_finish_timer(end_to_end_start)
 
         except Exception as e:
             print(f"❌ Error generating response: {e}")
@@ -214,21 +172,50 @@ def test_embedding_generation(client: OllamaClient, test_texts: List[str]) -> No
         try:
             ai_test_start_timer()
             embeddings = client.embed(embedding_model, text)
-            ai_test_finish_timer()
+            elapsed_time = ai_test_finish_timer()
 
             print(f"📊 Generated embeddings with {len(embeddings)} dimensions")
             print(f"🔢 First 5 values: {embeddings[:5]}")
-            print(f"⏱️  Generation time: {(ai_test_start):.2f}s")
+            print(f"⏱️  Generation time: {(elapsed_time):.2f}s")
 
         except Exception as e:
             print(f"❌ Error generating embeddings: {e}")
 
 
-def test_conversation_summarization(client: OllamaClient, user_profile: UserProfile, narrow: List[NarrowParameter]) -> None:
+def test_conversation_summarization(user_profile: UserProfile, narrow: List[NarrowParameter]) -> None:
     """Test conversation summarization like message_summary.py"""
-    print_separator("Testing Conversation Summarization")
+    print_separator("Testing Conversation Summarization (Using ZulipAIAgent)")
+
+    def format_zulip_messages(messages: list[dict[str, Any]]) -> str:
+        intro = "The following is a chat conversation."
+        topic: str | None = None
+        channel: str | None = None
+        if narrow and len(narrow) == 2:
+            for term in narrow:
+                assert not term.negated
+                if term.operator == "channel":
+                    channel = term.operand
+                if term.operator == "topic":
+                    topic = term.operand
+        if channel:
+            intro += f" channel: {channel}"
+        if topic:
+            intro += f", topic: {topic}"
+
+        msgs = [
+            {"sender": message["sender_full_name"], "content": message["content"]}
+            for message in messages
+        ]
+
+        formatted_conversation = orjson.dumps(msgs, option=orjson.OPT_INDENT_2).decode()
+        return formatted_conversation
 
     try:
+        # Get the agent for this realm
+        realm = user_profile.realm
+        agent = get_ai_agent(realm)
+        print(f"🤖 Using agent for realm: {realm.name}")
+
         # Get messages from the narrow (same as message_summary.py)
         print(f"📱 Fetching messages for user: {user_profile.email}")
         print(f"🎯 Narrow: {[f'{n.operator}:{n.operand}' for n in narrow]}")
@@ -242,12 +229,13 @@ def test_conversation_summarization(client: OllamaClient, user_profile: UserProf
         print(f"📨 Found {len(messages)} messages")
 
         # Format messages for display (like in message_summary.py)
-        formatted_conversation = format_zulip_messages(messages, narrow)
+        formatted_conversation = format_zulip_messages(messages)
         print("\n--- Formatted Conversation ---")
         print(formatted_conversation)
 
         default_model = getattr(settings, "AI_AGENTS_DEFAULT_MODEL", "llama3.1:8b")
         print(f"🤖 Using model: {default_model}")
+        print("📡 Using ZulipAIAgent with reasoning capabilities")
 
         # Convert messages to format expected by AI agent
         ai_messages = []
@@ -260,25 +248,46 @@ def test_conversation_summarization(client: OllamaClient, user_profile: UserProf
 
         print(f"\n--- AI Summarization ---")
         print(f"🤖 Summarizing {len(ai_messages)} messages...")
+        print("🤔 Reasoning...")
 
-        ai_test_start_timer()
-        response = client.generate(
-            model=default_model,
-            prompt=f"""
-            Given the following history conversation messages in Zulip Channel:
-            {formatted_conversation},
-            summarize the conversation in a concise manner.
-            """,
-            temperature=0.7,
-            stream=False
-        )
-        ai_test_finish_timer()
+        end_to_end_start = time.time()
 
-        print(f"📝 AI Summary: {response}")
-        print(f"⏱️  Summarization time: {(ai_test_start):.2f}s")
+        # Use the agent's chat method with context
+        summarization_prompt = f"Summarize the following conversation: {formatted_conversation}"
+        result = agent.chat(message=summarization_prompt, user=user_profile)
+
+        response_text = result["response"]
+        token_usage = result["tokens"]
+
+        # Calculate end-to-end time
+        end_to_end_time = time.time() - end_to_end_start
+
+        # Display the complete response
+        print(f"\n🤖 AI Summary:")
+        print(response_text)
+
+        # Show response statistics
+        print(f"\n📦 Response Statistics:")
+        print(f"   - Response length: {len(response_text)} characters")
+        print(f"   - Response time: {end_to_end_time:.2f}s")
+
+        # Display the token counts
+        print(f"\n📊 Token Counts:")
+        print(f"   - Prompt tokens: {token_usage.get('prompt_tokens', 0)}")
+        print(f"   - Completion tokens: {token_usage.get('completion_tokens', 0)}")
+        print(f"   - Total tokens: {token_usage.get('total_tokens', 0)}")
+
+        if token_usage.get('total_tokens', 0) > 0 and end_to_end_time > 0:
+            tokens_per_sec = token_usage['total_tokens'] / end_to_end_time
+            print(f"   - Tokens per second: {tokens_per_sec:.1f}")
+
+        print(f"⏱️  Total response time: {end_to_end_time:.2f}s")
+
+        # Track timing for summary
+        ai_test_finish_timer(end_to_end_start)
 
     except Exception as e:
-        print(f"❌ Error testing conversation summarization: {e}")
+        print(f"❌ Error in summarization test: {e}")
 
 
 def print_performance_summary() -> None:
@@ -300,6 +309,7 @@ def main() -> None:
     """Main test function"""
     print_separator("AI Agents Integration Test Suite")
     print(f"🚀 Starting tests at: {timezone_now()}")
+    print("\n📌 Note: This test suite validates the refactored AI agent architecture")
 
     # Test 1: Basic Ollama connection
     if not test_ollama_connection():
@@ -314,12 +324,12 @@ def main() -> None:
     test_chat_messages = [
         "Hello! How are you?",
         "What is Python?",
-        "Explain recursion in simple terms",
+        "Explain AI agents",
         "Write a function to calculate fibonacci numbers",
     ]
-    test_chat_generation(client, test_chat_messages)
+    test_chat_generation(test_chat_messages)
 
-    # Test 3: Embedding generation
+    # Test 4: Embedding generation
     test_embedding_texts = [
         "Hello world",
         "This is a longer text for embedding generation testing",
@@ -343,7 +353,7 @@ def main() -> None:
         narrow = [
             NarrowParameter(operator="channel", operand="devel", negated=False),
         ]
-        test_conversation_summarization(client, user_profile, narrow)
+        test_conversation_summarization(user_profile, narrow)
 
     except Exception as e:
         print(f"❌ Error setting up test user/realm: {e}")

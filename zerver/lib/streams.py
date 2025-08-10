@@ -363,6 +363,32 @@ def create_stream_if_needed(
             event_time=event_time,
         )
 
+        # Auto-subscribe AI Agent bot to the new channel
+        try:
+            ai_agent_bot = UserProfile.objects.filter(
+                realm=realm,
+                is_bot=True,
+                full_name="AI Agent",
+                email__startswith="ai-agent-bot@",
+                bot_type=UserProfile.EMBEDDED_BOT,
+                is_active=True,
+            ).first()
+
+            if ai_agent_bot:
+                from zerver.actions.streams import bulk_add_subscriptions
+                bulk_add_subscriptions(
+                    realm=realm,
+                    streams=[stream],
+                    users=[ai_agent_bot],
+                    acting_user=None,
+                    send_subscription_add_events=False,
+                )
+        except Exception as e:
+            # Log but don't fail stream creation if AI Agent subscription fails
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"Failed to auto-subscribe AI Agent to stream {stream.name}: {e}")
+
         if anonymous_group_membership is None:
             anonymous_group_membership = get_anonymous_group_membership_dict_for_streams([stream])
 

@@ -138,7 +138,7 @@ class ZulipAIAgent:
             </Reasoning>
 
             Here is a summary of the document:
-            ... (Your final, user-facing answer) ...
+            >... (Your final answer) ...<
 
             ## Profile:
             - Author: Helpful AI Assistant (a part of the Zulip platform integration)
@@ -147,7 +147,7 @@ class ZulipAIAgent:
 
             ### Skills:
             - Support query understanding and response generation for users within the {self.realm.name} organization.
-            - Assist in answering a wide range of questions related to technology, productivity, best practices, and company policies.
+            - Assist in answering a wide range of questions.
             - Provide general information and direct users who need more specialized assistance to authorized resources.
             - Apply structured reasoning to complex problems.
 

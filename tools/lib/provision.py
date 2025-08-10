@@ -334,7 +334,7 @@ def download_ollama_models():
 
     # Model sizes in GB (approximate)
     models_to_download = [
-        ("llama3.1:8b", 4.7),       # Main language model ~4.7GB
+        ("llama3.1:8b", 4.9),       # Main language model ~4.9GB
         ("nomic-embed-text:v1.5", 0.3),  # Embedding model ~300MB
     ]
 

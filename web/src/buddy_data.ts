@@ -55,6 +55,14 @@ export function get_user_circle_class(user_id: number, use_deactivated_circle = 
         return "user-circle-deactivated";
     }
 
+    // Check if this is specifically the AI Agent bot
+    const person = people.maybe_get_user_by_id(user_id);
+    if (person && person.is_bot && person.full_name === "AI Agent" && person.delivery_email?.toLowerCase().startsWith("ai-agent-bot@")) {
+        // AI Agent is always active
+        return "user-circle-active";
+    }
+
+    // For all other users (including test users), use normal presence logic
     const status = presence.get_status(user_id);
 
     switch (status) {
@@ -71,6 +79,13 @@ export function level(user_id: number): number {
     // Put current user at the top, unless we're in a user search view.
     if (people.is_my_user_id(user_id) && !is_searching_users) {
         return 0;
+    }
+
+    // Check if this is the AI Agent bot - should appear near the top
+    const person = people.maybe_get_user_by_id(user_id);
+    if (person && person.is_bot && person.full_name === "AI Agent" && person.delivery_email?.toLowerCase().startsWith("ai-agent-bot@")) {
+        // AI Agent is always active, so give it active priority
+        return 1;
     }
 
     const status = presence.get_status(user_id);
@@ -391,10 +406,15 @@ function filter_user_ids(user_filter_text: string, user_ids: number[]): number[]
         }
 
         if (person.is_bot) {
-            // Bots should never appear in the right sidebar.  This
-            // case should never happen, since bots cannot have
-            // presence data.
-            return false;
+            // Allow AI Agent bot to appear in the right sidebar
+            if (person.full_name === "AI Agent" && person.delivery_email?.toLowerCase().startsWith("ai-agent-bot@")) {
+                // AI Agent is allowed to appear
+            } else {
+                // Other bots should never appear in the right sidebar.  This
+                // case should never happen, since bots cannot have
+                // presence data.
+                return false;
+            }
         }
 
         const is_dm = direct_message_recipients.has(user_id);
@@ -440,6 +460,20 @@ function get_filtered_user_id_list(
         const my_user_id = people.my_current_user_id();
         if (!base_user_id_list.includes(my_user_id)) {
             base_user_id_list = [my_user_id, ...base_user_id_list];
+        }
+
+        // Always include the AI Agent bot - find it by name and email pattern
+        const all_users = people.get_active_user_ids();
+        for (const user_id of all_users) {
+            const person = people.maybe_get_user_by_id(user_id);
+            if (person && person.is_bot &&
+                person.full_name === "AI Agent" && person.delivery_email?.toLowerCase().startsWith("ai-agent-bot@")) {
+                if (!base_user_id_list.includes(user_id)) {
+                    // Add AI Agent bot after current user so it appears near the top
+                    base_user_id_list.splice(1, 0, user_id);
+                }
+                break;
+            }
         }
 
         // We want to always show PM recipients even if they're inactive.

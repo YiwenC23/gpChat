@@ -198,7 +198,7 @@ class Migration(migrations.Migration):
             ],
             options={
                 "db_table": "zerver_aiagentusagestats",
-                "unique_together": {("realm", "user", "date", "hour")},
+                # Removed unique_together - OneToOneField to interaction already ensures uniqueness
             },
         ),
         migrations.AddIndex(

@@ -157,7 +157,7 @@ class AIAgentUsageStats(models.Model):
 
     class Meta:
         db_table = "zerver_aiagentusagestats"
-        unique_together = ("realm", "user", "date", "hour")
+        # Removed unique_together constraint - OneToOneField to interaction already ensures uniqueness
         indexes = [
             models.Index(fields=["realm", "date"]),
             models.Index(fields=["user", "date"]),

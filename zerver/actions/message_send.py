@@ -531,6 +531,16 @@ def get_service_bot_events(
             queue_name = "outgoing_webhooks"
         elif bot_type == UserProfile.EMBEDDED_BOT:
             queue_name = "embedded_bots"
+            # Route AI Agent bot to dedicated ai_agents queue
+            try:
+                bot_user = UserProfile.objects.only("full_name", "delivery_email", "is_bot", "bot_type").get(id=user_profile_id)
+                if bot_user.is_bot and bot_user.bot_type == UserProfile.EMBEDDED_BOT:
+                    email = (bot_user.delivery_email or "").lower()
+                    if bot_user.full_name == "AI Agent" or email.startswith("ai-agent-bot@"):
+                        queue_name = "ai_agents"
+            except Exception:
+                # Fallback silently to embedded_bots if lookup fails
+                pass
         else:
             logging.error(
                 "Unexpected bot_type for Service bot id=%s: %s",

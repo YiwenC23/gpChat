@@ -68,28 +68,19 @@ def _log_interaction_and_update_stats(
             error_message=error_message,
         )
 
-        # Update usage stats
+        # Create usage stats for this interaction
         now = timezone_now()
-        stats, created = AIAgentUsageStats.objects.get_or_create(
+        AIAgentUsageStats.objects.create(
+            interaction=interaction,
             realm=realm,
             user=user,
             date=now.date(),
             hour=now.hour,
-            defaults={
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
-                "total_tokens": 0,
-                "response_time_ms": 0,
-            },
+            prompt_tokens=token_usage.get("prompt_tokens", 0) if token_usage else 0,
+            completion_tokens=token_usage.get("completion_tokens", 0) if token_usage else 0,
+            total_tokens=token_usage.get("total_tokens", 0) if token_usage else 0,
+            response_time_ms=response_time_ms,
         )
-
-        stats.interaction = interaction
-        if token_usage:
-            stats.prompt_tokens = token_usage.get("prompt_tokens", 0)
-            stats.completion_tokens = token_usage.get("completion_tokens", 0)
-            stats.total_tokens = token_usage.get("total_tokens", 0)
-        stats.response_time_ms = response_time_ms
-        stats.save()
 
     except Exception as e:
         logger.error(f"Failed to log AI agent interaction: {e}")
@@ -308,10 +299,56 @@ class AIAgentWorker(QueueProcessingWorker):
         if bot_profile is None:
             logger.error("AI bot user not found in realm; cannot deliver response")
             return
-        internal_send_private_message(
-            bot_profile,
-            user,
-            response_text,
-        )
+
+        # Check if the original message was in a stream/channel
+        recipient_type = message.get("type")
+        if recipient_type == "stream":
+            # Reply in the same stream and topic
+            from zerver.actions.message_send import internal_send_stream_message_by_name
+            from zerver.models.streams import get_stream
+            from zerver.models import Subscription
+            from zerver.actions.streams import bulk_add_subscriptions
+
+            stream_name = message.get("display_recipient")
+            topic_name = message.get("subject", "")
+
+            # Auto-join the stream if not already a member
+            try:
+                stream = get_stream(stream_name, realm)
+
+                # Check if bot is subscribed to the stream
+                is_subscribed = Subscription.objects.filter(
+                    user_profile=bot_profile,
+                    recipient__type_id=stream.id,
+                    recipient__type=2,  # Recipient.STREAM
+                    active=True
+                ).exists()
+
+                if not is_subscribed:
+                    logger.info(f"Auto-subscribing AI Agent to stream '{stream_name}'")
+                    bulk_add_subscriptions(
+                        realm=realm,
+                        streams=[stream],
+                        users=[bot_profile],
+                        acting_user=None,
+                        send_subscription_add_events=False,
+                    )
+            except Exception as e:
+                logger.warning(f"Could not auto-subscribe AI Agent to stream '{stream_name}': {e}")
+
+            internal_send_stream_message_by_name(
+                realm,
+                bot_profile,
+                stream_name,
+                topic_name,
+                response_text,
+            )
+        else:
+            # Send as a private message
+            internal_send_private_message(
+                bot_profile,
+                user,
+                response_text,
+            )
 
         logger.info(f"AI agent chat request processed successfully in {response_time_ms}ms")

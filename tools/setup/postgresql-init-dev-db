@@ -75,7 +75,7 @@ ALTER USER $USERNAME CREATEDB;
 ALTER ROLE $USERNAME SET search_path TO $SEARCH_PATH;
 
 DO \$\$BEGIN
-    CREATE USER "$VAGRANTUSERNAME"; 
+    CREATE USER "$VAGRANTUSERNAME";
 EXCEPTION WHEN duplicate_object THEN
     RAISE NOTICE '$VAGRANTUSERNAME user already exists';
 END\$\$;
@@ -116,6 +116,9 @@ SELECT unnest(
         ARRAY['ALTER SYSTEM SET pgroonga.enable_wal = ''on''', 'SELECT pg_reload_conf()']
     END
 ) \gexec
+
+-- Enable pgvectorscale extension (with cascade to install vector dependency)
+CREATE EXTENSION IF NOT EXISTS vectorscale CASCADE;
 EOF
 
 psql -v ON_ERROR_STOP=1 -e -h localhost postgres "$USERNAME" <<EOF

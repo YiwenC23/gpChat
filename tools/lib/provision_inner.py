@@ -259,6 +259,61 @@ def need_to_run_configure_rabbitmq(settings_list: list[str]) -> bool:
         return True
 
 
+def enable_pgvectorscale_extension(dbname: str = None) -> None:
+    """Enable pgvectorscale extension in the database."""
+    if dbname is None:
+        print("Enabling pgvectorscale extension...")
+        try:
+            from django.conf import settings
+            # Get the database name from Django settings
+            dbname = settings.DATABASES["default"]["NAME"]
+        except Exception:
+            print("  ⚠ Warning: Could not get database name from Django settings")
+            return
+
+    try:
+        # Use sudo -u postgres psql to execute as superuser
+        # This is necessary because only superusers can create extensions
+        result = subprocess.run(
+            ["sudo", "-u", "postgres", "psql", "-d", dbname, "-c",
+             "CREATE EXTENSION IF NOT EXISTS vectorscale CASCADE;"],
+            capture_output=True,
+            text=True,
+            check=False
+        )
+
+        if result.returncode != 0:
+            # If the command failed, check if it's because the extension already exists
+            if "already exists" in result.stderr:
+                print(f"  ✓ pgvectorscale extension already enabled in {dbname}")
+            else:
+                print(f"  ⚠ Warning: Could not enable pgvectorscale extension in {dbname}: {result.stderr}")
+                print("  You may need to enable it manually with: CREATE EXTENSION IF NOT EXISTS vectorscale CASCADE;")
+                return
+        else:
+            print(f"  ✓ pgvectorscale extension enabled successfully in {dbname}")
+
+        # Verify installation
+        verify_result = subprocess.run(
+            ["sudo", "-u", "postgres", "psql", "-d", dbname, "-t", "-c",
+             "SELECT extname || ' v' || extversion FROM pg_extension WHERE extname IN ('vector', 'vectorscale');"],
+            capture_output=True,
+            text=True,
+            check=False
+        )
+
+        if verify_result.returncode == 0 and verify_result.stdout.strip():
+            for line in verify_result.stdout.strip().split('\n'):
+                if line.strip():
+                    print(f"  ✓ {line.strip()} enabled in {dbname}")
+        else:
+            print(f"  ⚠ Warning: Could not verify pgvectorscale installation in {dbname}")
+
+    except Exception as e:
+        print(f"  ⚠ Warning: Unexpected error enabling pgvectorscale extension in {dbname}: {e}")
+        print("  You may need to enable it manually with: CREATE EXTENSION IF NOT EXISTS vectorscale CASCADE;")
+
+
 def main(options: argparse.Namespace) -> int:
     setup_bash_profile()
     setup_shell_profile("~/.zprofile")
@@ -352,6 +407,10 @@ def main(options: argparse.Namespace) -> int:
         elif dev_template_db_status == "current":
             print("No need to regenerate the dev DB.")
 
+        # Enable pgvectorscale extension in the development database
+        if not options.skip_dev_db_build:
+            enable_pgvectorscale_extension()
+
         test_template_db_status = TEST_DATABASE.template_status()
         if options.is_force or test_template_db_status == "needs_rebuild":
             run(["tools/setup/postgresql-init-test-db"])
@@ -361,6 +420,10 @@ def main(options: argparse.Namespace) -> int:
             TEST_DATABASE.run_db_migrations()
         elif test_template_db_status == "current":
             print("No need to regenerate the test DB.")
+
+        # Enable pgvectorscale extension in the test database as well
+        enable_pgvectorscale_extension("zulip_test")
+        enable_pgvectorscale_extension("zulip_test_template")
 
         if options.is_force or need_to_run_compilemessages():
             run(["./manage.py", "compilemessages", "--ignore=*"])

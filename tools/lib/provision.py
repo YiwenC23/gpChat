@@ -150,6 +150,20 @@ COMMON_YUM_DEPENDENCIES = [
 
 BUILD_GROONGA_FROM_SOURCE = False
 BUILD_PGROONGA_FROM_SOURCE = False
+BUILD_PGVECTORSCALE_FROM_SOURCE = False
+ENABLE_PGVECTORSCALE = False
+
+# Check if PostgreSQL version supports pgvector/pgvectorscale (>= 13)
+PG_MAJOR = int(POSTGRESQL_VERSION.split(".")[0]) if "." in POSTGRESQL_VERSION else int(POSTGRESQL_VERSION)
+if PG_MAJOR >= 13:
+    # Enable pgvectorscale on supported platforms
+    if vendor in ["debian", "ubuntu"]:
+        ENABLE_PGVECTORSCALE = True
+        BUILD_PGVECTORSCALE_FROM_SOURCE = True
+    elif vendor == "fedora":
+        ENABLE_PGVECTORSCALE = True
+        BUILD_PGVECTORSCALE_FROM_SOURCE = True
+
 if (vendor == "debian" and os_version in []) or (vendor == "ubuntu" and os_version in []):
     # For platforms without a PGroonga release, we need to build it
     # from source.
@@ -172,12 +186,27 @@ elif "debian" in os_families():
     if platform.machine() == "aarch64":
         DEBIAN_DEPENDENCIES.append("cmake")
 
-    SYSTEM_DEPENDENCIES = [
+    BASE_DEPENDENCIES = [
         *DEBIAN_DEPENDENCIES,
         f"postgresql-{POSTGRESQL_VERSION}",
         f"postgresql-{POSTGRESQL_VERSION}-pgroonga",
         *VENV_DEPENDENCIES,
     ]
+
+    # Add pgvector and build dependencies if PostgreSQL >= 13
+    if ENABLE_PGVECTORSCALE:
+        BASE_DEPENDENCIES.extend([
+            f"postgresql-{POSTGRESQL_VERSION}-pgvector",  # pgvector from apt
+            f"postgresql-server-dev-{POSTGRESQL_VERSION}",  # for building extensions
+            "build-essential",
+            "clang",
+            "llvm",
+            "pkg-config",
+            "libssl-dev",
+            "jq",  # for parsing cargo metadata
+        ])
+
+    SYSTEM_DEPENDENCIES = BASE_DEPENDENCIES
 elif "rhel" in os_families():
     SYSTEM_DEPENDENCIES = [
         *COMMON_YUM_DEPENDENCIES,
@@ -416,6 +445,16 @@ def install_system_deps() -> None:
     if BUILD_PGROONGA_FROM_SOURCE:
         run_as_root(["./scripts/lib/build-pgroonga"])
 
+    # Build pgvectorscale if enabled and needed
+    if BUILD_PGVECTORSCALE_FROM_SOURCE and ENABLE_PGVECTORSCALE:
+        print("\n=====Building pgvectorscale extension=====")
+        try:
+            run_as_root(["./scripts/lib/build-pgvectorscale"])
+            print("pgvectorscale build completed successfully!")
+        except subprocess.CalledProcessError as e:
+            print(f"Warning: Failed to build pgvectorscale: {e}")
+            print("You can try building it manually later with: sudo ./scripts/lib/build-pgvectorscale")
+
 
 def install_apt_deps(deps_to_install: list[str]) -> None:
     # setup-apt-repo does an `apt-get update` if the sources.list files changed.
@@ -555,6 +594,12 @@ def main(options: argparse.Namespace) -> NoReturn:
     if BUILD_PGROONGA_FROM_SOURCE:
         with open("scripts/lib/build-pgroonga", "rb") as fb:
             sha_sum.update(fb.read())
+
+    # hash the content of build-pgvectorscale if pgvectorscale is built from source
+    if BUILD_PGVECTORSCALE_FROM_SOURCE and ENABLE_PGVECTORSCALE:
+        if os.path.exists("scripts/lib/build-pgvectorscale"):
+            with open("scripts/lib/build-pgvectorscale", "rb") as fb:
+                sha_sum.update(fb.read())
 
     new_apt_dependencies_hash = sha_sum.hexdigest()
     last_apt_dependencies_hash = None

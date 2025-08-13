@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+set -e
+set -x
+
+# This script builds and installs pgvectorscale, a PostgreSQL extension
+# that provides high-performance vector search capabilities via DiskANN indexes.
+# It complements pgvector with better performance and cost-efficient storage.
+
+ZULIP_PATH="$(dirname "$0")/../.."
+PGSCALE_VERSION="${PGSCALE_VERSION:-0.8.0}"
+
+# Get PostgreSQL version
+if [ -f /etc/os-release ]; then
+    . /etc/os-release
+    OS_ID="$ID"
+    OS_VERSION="$VERSION_ID"
+else
+    echo "Cannot determine OS version"
+    exit 1
+fi
+
+# Determine PostgreSQL version based on OS
+if [ "$OS_ID" = "debian" ] && [ "$OS_VERSION" = "12" ]; then
+    POSTGRESQL_VERSION="15"
+elif [ "$OS_ID" = "ubuntu" ] && [ "$OS_VERSION" = "22.04" ]; then
+    POSTGRESQL_VERSION="14"
+elif [ "$OS_ID" = "ubuntu" ] && [ "$OS_VERSION" = "24.04" ]; then
+    POSTGRESQL_VERSION="16"
+elif [ "$OS_ID" = "fedora" ] && [ "$OS_VERSION" = "38" ]; then
+    POSTGRESQL_VERSION="15"
+else
+    echo "Unsupported OS for pgvectorscale build: $OS_ID $OS_VERSION"
+    exit 1
+fi
+
+# Check PostgreSQL version is >= 13 (required for pgvector/pgvectorscale)
+PG_MAJOR="${POSTGRESQL_VERSION%%.*}"
+if [ "$PG_MAJOR" -lt 13 ]; then
+    echo "PostgreSQL $POSTGRESQL_VERSION is too old for pgvectorscale (requires >= 13)"
+    exit 1
+fi
+
+echo "Building pgvectorscale for PostgreSQL $POSTGRESQL_VERSION"
+
+# Install Rust if not present
+if ! command -v cargo &> /dev/null; then
+    echo "Installing Rust toolchain..."
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+    source "$HOME/.cargo/env"
+fi
+
+# Ensure cargo is in PATH
+if [ -f "$HOME/.cargo/env" ]; then
+    source "$HOME/.cargo/env"
+fi
+
+# Check cargo is available
+if ! command -v cargo &> /dev/null; then
+    echo "Cargo not found after installation. Please check your Rust installation."
+    exit 1
+fi
+
+# Create a temporary directory for the build
+BUILD_DIR=$(mktemp -d)
+trap "rm -rf $BUILD_DIR" EXIT
+
+cd "$BUILD_DIR"
+
+# Clone pgvectorscale repository
+echo "Cloning pgvectorscale $PGSCALE_VERSION..."
+git clone --branch "$PGSCALE_VERSION" --depth 1 https://github.com/timescale/pgvectorscale.git
+cd pgvectorscale/pgvectorscale
+
+# Install cargo-pgrx with the correct version
+echo "Installing cargo-pgrx..."
+PGRX_VERSION=$(cargo metadata --format-version 1 | jq -r '.packages[] | select(.name == "pgrx") | .version')
+if [ -z "$PGRX_VERSION" ]; then
+    # Fallback to a known compatible version if detection fails
+    PGRX_VERSION="0.12.8"
+fi
+cargo install --locked cargo-pgrx --version "$PGRX_VERSION"
+
+# Initialize cargo-pgrx with the correct PostgreSQL version
+echo "Initializing cargo-pgrx for PostgreSQL $POSTGRESQL_VERSION..."
+cargo pgrx init --pg"$PG_MAJOR" "$(command -v pg_config)"
+
+# Build and install pgvectorscale
+echo "Building and installing pgvectorscale..."
+cargo pgrx install --release
+
+# Verify installation
+echo "Verifying pgvectorscale installation..."
+# Change to a neutral directory to avoid permission issues
+cd /tmp
+sudo -u postgres psql -d postgres -c "SELECT name, default_version FROM pg_available_extensions WHERE name IN ('vector', 'vectorscale');" || true
+
+echo "pgvectorscale build complete!"

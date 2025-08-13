@@ -381,7 +381,6 @@ def create_stream_if_needed(
                     streams=[stream],
                     users=[ai_agent_bot],
                     acting_user=None,
-                    send_subscription_add_events=False,
                 )
         except Exception as e:
             # Log but don't fail stream creation if AI Agent subscription fails

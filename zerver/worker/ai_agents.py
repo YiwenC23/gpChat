@@ -4,7 +4,8 @@ Handles asynchronous AI processing tasks
 """
 import logging
 import time
-from typing import Any, Dict, Mapping
+import orjson
+from typing import Any, Dict, List, Mapping
 from typing_extensions import override
 
 from django.conf import settings
@@ -15,6 +16,16 @@ from zerver.models.messages import Message
 from zerver.models.realms import Realm, get_realm
 from zerver.models.users import UserProfile, get_user_profile_by_id
 from zerver.actions.message_send import internal_send_private_message
+
+# For fetching message history
+from zerver.lib.narrow import (
+    LARGER_THAN_MAX_MESSAGE_ID,
+    NarrowParameter,
+    clean_narrow_for_message_fetch,
+    fetch_messages,
+)
+from zerver.lib.message import messages_for_ids
+from zerver.models.realms import MessageEditHistoryVisibilityPolicyEnum
 
 from django.utils.timezone import now as timezone_now
 
@@ -260,15 +271,168 @@ class AIAgentWorker(QueueProcessingWorker):
         except Exception:
             return None
 
-    def _handle_chat_task(self, message: Dict[str, Any], realm: Realm, user: UserProfile,
-                         ai_agent: Any, ai_config: AIAgentConfig, start_time: float) -> None:
-        """Handle chat and ReAct tasks"""
-        prompt = message["content"]
+    def _fetch_message_history(
+        self,
+        realm: Realm,
+        user: UserProfile,
+        stream_name: str | None = None,
+        topic_name: str | None = None,
+        num_messages: int = 50,
+        exclude_message_id: int | None = None,
+    ) -> str | None:
+        """Fetch recent message history from a channel/topic or DM conversation
 
-        # Generate AI response
+        Args:
+            exclude_message_id: If provided, exclude this message from the history (e.g., the triggering message)
+        """
+        try:
+            narrow = []
+
+            # Build narrow based on message type
+            if stream_name:
+                narrow.append(NarrowParameter(operator="channel", operand=stream_name, negated=False))
+                if topic_name:
+                    narrow.append(NarrowParameter(operator="topic", operand=topic_name, negated=False))
+            else:
+                # For DM conversations, we could add DM narrow support here if needed
+                return None
+
+            # Clean narrow for fetching
+            narrow = clean_narrow_for_message_fetch(narrow, realm, user)
+
+            # Fetch messages
+            # We fetch num_messages + 1 to account for potentially excluding the current message
+            query_info = fetch_messages(
+                narrow=narrow,
+                user_profile=user,
+                realm=realm,
+                is_web_public_query=False,
+                anchor=LARGER_THAN_MAX_MESSAGE_ID,
+                include_anchor=False,  # Don't include the anchor (latest message) by default
+                num_before=num_messages + 1,  # Fetch extra in case we need to exclude one
+                num_after=0,
+            )
+
+            if not query_info.rows:
+                return None
+
+            # Get message IDs and filter out the current triggering message if specified
+            result_message_ids = [row[0] for row in query_info.rows]
+            if exclude_message_id and exclude_message_id in result_message_ids:
+                result_message_ids.remove(exclude_message_id)
+
+            # Limit to num_messages after exclusion
+            result_message_ids = result_message_ids[:num_messages]
+
+            user_message_flags = {msg_id: [] for msg_id in result_message_ids}
+
+            # Get full message objects
+            message_list = messages_for_ids(
+                message_ids=result_message_ids,
+                user_message_flags=user_message_flags,
+                search_fields={},
+                apply_markdown=False,
+                client_gravatar=True,
+                allow_empty_topic_name=False,
+                message_edit_history_visibility_policy=MessageEditHistoryVisibilityPolicyEnum.none.value,
+                user_profile=user,
+                realm=realm,
+            )
+
+            if not message_list:
+                return None
+
+            # Format messages into context string
+            intro = f"The following is the recent conversation history in channel #{stream_name}"
+            if topic_name:
+                intro += f", topic: {topic_name}"
+            intro += ".\n\n"
+
+            # Build conversation transcript
+            messages_json = []
+            for msg in message_list:
+                messages_json.append({
+                    "sender": msg["sender_full_name"],
+                    "content": msg["content"]
+                })
+
+            formatted_conversation = orjson.dumps(messages_json, option=orjson.OPT_INDENT_2).decode()
+            return intro + formatted_conversation
+
+        except Exception as e:
+            logger.error(f"Failed to fetch message history: {e}")
+            return None
+
+    def _handle_chat_task(self, message: Dict[str, Any], realm: Realm, user: UserProfile,
+                            ai_agent: Any, ai_config: AIAgentConfig, start_time: float) -> None:
+        """Handle chat tasks"""
+        prompt = message["content"]
+        context = None
+        current_message_id = message.get("id")  # Get the current message ID to exclude it from history
+
+        # Get the bot profile early
+        bot_profile = self._get_ai_bot_profile(realm)
+        if bot_profile is None:
+            logger.error("AI bot user not found in realm; cannot deliver response")
+            return
+
+        # Check if the original message was in a stream/channel
+        recipient_type = message.get("type")
+        stream_name = None
+        topic_name = None
+
+        if recipient_type == "stream":
+            stream_name = message.get("display_recipient")
+            topic_name = message.get("subject", "")
+
+            # Auto-join the stream BEFORE fetching history
+            from zerver.models.streams import get_stream
+            from zerver.models import Subscription
+            from zerver.actions.streams import bulk_add_subscriptions
+
+            try:
+                stream = get_stream(stream_name, realm)
+
+                # Check if bot is subscribed to the stream
+                is_subscribed = Subscription.objects.filter(
+                    user_profile=bot_profile,
+                    recipient__type_id=stream.id,
+                    recipient__type=2,  # Recipient.STREAM
+                    active=True
+                ).exists()
+
+                if not is_subscribed:
+                    logger.info(f"Auto-subscribing AI Agent to stream '{stream_name}'")
+                    bulk_add_subscriptions(
+                        realm=realm,
+                        streams=[stream],
+                        users=[bot_profile],
+                        acting_user=None,
+                        send_subscription_add_events=False,
+                    )
+            except Exception as e:
+                logger.warning(f"Could not auto-subscribe AI Agent to stream '{stream_name}': {e}")
+
+            # Fetch message history for the channel/topic, excluding the current message
+            context = self._fetch_message_history(
+                realm=realm,
+                user=bot_profile,  # Use bot profile to ensure we can read the messages
+                stream_name=stream_name,
+                topic_name=topic_name,
+                num_messages=50,  # Fetch last 50 messages for context
+                exclude_message_id=current_message_id  # Exclude the current triggering message
+            )
+
+            if context:
+                logger.info(f"Fetched message history for stream '{stream_name}', topic '{topic_name}'")
+            else:
+                logger.info(f"No message history found for stream '{stream_name}', topic '{topic_name}'")
+
+        # Generate AI response with context
         response_data = ai_agent.chat(
             message=prompt,
             user=user,
+            context=context  # Pass the fetched message history as context
         )
 
         response_time_ms = int((time.time() - start_time) * 1000)
@@ -294,47 +458,10 @@ class AIAgentWorker(QueueProcessingWorker):
             token_usage=token_usage,
         )
 
-        # Send the response back to the user
-        bot_profile = self._get_ai_bot_profile(realm)
-        if bot_profile is None:
-            logger.error("AI bot user not found in realm; cannot deliver response")
-            return
-
-        # Check if the original message was in a stream/channel
-        recipient_type = message.get("type")
+        # Send the response back
         if recipient_type == "stream":
             # Reply in the same stream and topic
             from zerver.actions.message_send import internal_send_stream_message_by_name
-            from zerver.models.streams import get_stream
-            from zerver.models import Subscription
-            from zerver.actions.streams import bulk_add_subscriptions
-
-            stream_name = message.get("display_recipient")
-            topic_name = message.get("subject", "")
-
-            # Auto-join the stream if not already a member
-            try:
-                stream = get_stream(stream_name, realm)
-
-                # Check if bot is subscribed to the stream
-                is_subscribed = Subscription.objects.filter(
-                    user_profile=bot_profile,
-                    recipient__type_id=stream.id,
-                    recipient__type=2,  # Recipient.STREAM
-                    active=True
-                ).exists()
-
-                if not is_subscribed:
-                    logger.info(f"Auto-subscribing AI Agent to stream '{stream_name}'")
-                    bulk_add_subscriptions(
-                        realm=realm,
-                        streams=[stream],
-                        users=[bot_profile],
-                        acting_user=None,
-                        send_subscription_add_events=False,
-                    )
-            except Exception as e:
-                logger.warning(f"Could not auto-subscribe AI Agent to stream '{stream_name}': {e}")
 
             internal_send_stream_message_by_name(
                 realm,

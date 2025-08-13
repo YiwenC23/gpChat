@@ -76,14 +76,22 @@ class OllamaClient:
     def __init__(self, base_url: str = "http://localhost:11434"):
         self.base_url = base_url.rstrip("/")
         self.session = requests.Session()
+        # Get timeout settings from Django settings
+        self.connection_timeout = getattr(settings, "OLLAMA_CONNECTION_TIMEOUT", 30)
+        self.request_timeout = getattr(settings, "OLLAMA_REQUEST_TIMEOUT", 300)
 
     def _make_request(self, method: str, endpoint: str, **kwargs) -> requests.Response:
         """Make HTTP request to Ollama API with error handling"""
         url = f"{self.base_url}/api/{endpoint}"
 
-        # For generate requests, disable timeout.
-        if endpoint == "generate":
-            kwargs["timeout"] = 3000000  # or set to a very high value
+        # Set appropriate timeout based on endpoint
+        if "timeout" not in kwargs:
+            if endpoint == "generate":
+                # Use very long timeout for generation (streaming)
+                kwargs["timeout"] = (self.connection_timeout, None)  # Connection timeout, no read timeout
+            else:
+                # Use standard timeout for other endpoints
+                kwargs["timeout"] = (self.connection_timeout, self.request_timeout)
 
         try:
             # Log the request details for debugging (only in debug mode)
@@ -115,7 +123,7 @@ class OllamaClient:
         system: Optional[str] = None,
         context: Optional[List[int]] = None,
         temperature: float = 0.7,
-        stream: bool = True,  # Default to True for streaming
+        stream: bool = False,  # Defaults to False (non-streaming)
         keep_alive: str = "10m",  # Keep model in memory for 10 minutes
         return_raw: bool = False,  # For backward compatibility
     ) -> Union[OllamaGenerateResponse, StreamingResponse, str, Iterator[str]]:
@@ -127,13 +135,13 @@ class OllamaClient:
             system: Optional system prompt
             context: Optional context from previous conversation
             temperature: Temperature for generation (0.0 to 1.0)
-            stream: Whether to stream the response
+            stream: Whether to stream the response. Defaults to False (non-streaming) for compatibility
             keep_alive: How long to keep the model in memory (e.g., "5m", "10m", "1h")
             return_raw: If True, return raw string (for backward compatibility)
 
         Returns:
-            OllamaGenerateResponse with token counts for non-streaming
-            StreamingResponse wrapper for streaming (with token counts available after consumption)
+            When stream=False (default): OllamaGenerateResponse with immediate token counts
+            When stream=True: StreamingResponse wrapper (token counts only available after full consumption)
             Raw string/iterator if return_raw=True (for backward compatibility)
         """
         payload = {

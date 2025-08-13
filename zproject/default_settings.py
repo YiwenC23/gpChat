@@ -752,6 +752,7 @@ AI_AGENTS_MAX_EMBEDDING_TEXT_LENGTH: int = 10000
 AI_AGENTS_DEFAULT_TEMPERATURE: float = 0.7
 AI_AGENTS_DEFAULT_TOP_P: float = 0.9
 AI_AGENTS_KEEP_ALIVE: str = "10m"  # Keep model in memory for 10 minutes
+AI_AGENTS_STREAM_RESPONSE: bool = False  # Stream responses for chat interactions
 
 # Model management
 AI_AGENTS_AUTO_DOWNLOAD_MODELS: bool = True

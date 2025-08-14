@@ -407,8 +407,7 @@ class AIAgentWorker(QueueProcessingWorker):
                         realm=realm,
                         streams=[stream],
                         users=[bot_profile],
-                        acting_user=None,
-                        send_subscription_add_events=False,
+                        acting_user=None
                     )
             except Exception as e:
                 logger.warning(f"Could not auto-subscribe AI Agent to stream '{stream_name}': {e}")

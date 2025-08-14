@@ -2,6 +2,7 @@
 Zulip AI Agents Integration Library
 Provides interface between Zulip and local Ollama AI models
 """
+import hashlib
 import json
 import logging
 import re
@@ -14,7 +15,6 @@ import textwrap
 from zerver.lib.ollama_client import OllamaClient, OllamaGenerateResponse, StreamingResponse
 from zerver.lib.ai_agent_tools import (
     get_tool_by_name,
-    get_all_tools,
     get_tools_json_schema
 )
 from zerver.models import Realm, UserProfile
@@ -86,6 +86,13 @@ class ZulipAIAgent:
         self.embedding_model = getattr(settings, "AI_AGENTS_EMBEDDING_MODEL", "nomic-embed-text:v1.5")
         self.keep_alive = getattr(settings, "AI_AGENTS_KEEP_ALIVE", "10m")  # Keep model in memory for 10 minutes
         self.stream_response = getattr(settings, "AI_AGENTS_STREAM_RESPONSE", False)  # Stream responses for chat interactions
+
+        # System prompt cache fields
+        self._cached_system_prompt: Optional[str] = None
+        self._cached_system_prompt_key: Optional[str] = None
+        self._cached_system_prompt_time: float = 0.0
+        # Optional TTL in seconds; set 0 to disable TTL and rely only on fingerprint
+        self._system_prompt_ttl_seconds: int = getattr(settings, "AI_AGENTS_SYSTEM_PROMPT_TTL", 300)
 
     def chat(
         self,
@@ -271,7 +278,34 @@ class ZulipAIAgent:
         return text
 
     def _get_system_prompt(self, user: UserProfile) -> str:
-        """Get system prompt based on agent type"""
+        """Get system prompt based on agent type with in-process caching."""
+        # Prepare inputs that affect the prompt content
+        try:
+            # Use a stable, compact string for hashing; sort_keys avoids reordering noise
+            tools_schema_str = json.dumps(get_tools_json_schema(), sort_keys=True)
+        except Exception:
+            tools_schema_str = "[]"
+
+        # Create a stable fingerprint of the critical inputs (realm + tools schema)
+        hasher = hashlib.sha256()
+        hasher.update(self.realm.name.encode("utf-8"))
+        hasher.update(b"|")
+        hasher.update(tools_schema_str.encode("utf-8"))
+        fingerprint = hasher.hexdigest()
+
+        # If cached and still valid, return it
+        now = time.time()
+        if (
+            self._cached_system_prompt is not None
+            and self._cached_system_prompt_key == fingerprint
+            and (
+                self._system_prompt_ttl_seconds <= 0
+                or (now - self._cached_system_prompt_time) < self._system_prompt_ttl_seconds
+            )
+        ):
+            return self._cached_system_prompt
+
+        # Otherwise rebuild prompt as before
         base_prompt = textwrap.dedent(f"""
 **You are Zulip AI Agent**, an AI assistant operating in two modes depending on the query context.
 
@@ -306,6 +340,21 @@ When crafting a response, follow these steps:
      *(This entire reasoning process should be wrapped in `<Reasoning>...</Reasoning>` tags.)*
 3. **Formulate Final Answer:** Outside the reasoning block, present a clear and concise answer or solution to the user's question. This is the response the user will focus on, so ensure it directly addresses their query with accurate information.
 
+## Example Response Structure
+
+<Reasoning>
+    The user is asking for a summary of a long document.
+    1. The query is non-Zulip specific, so I will respond in General Chat Mode.
+    2. First, I will identify the key sections of the document.
+    3. Next, I'll extract the main points from each section.
+    4. Then, I will synthesize those points into a concise summary.
+    By following these steps, the summary will cover all important content in an easy-to-understand way.
+</Reasoning>
+
+> ...Your final answer summarizing the document goes here... <
+
+*(In the above example, the `<Reasoning>` section shows the thought process, and the final answer (outside the tags) provides the summary.)*
+
 ## Skills
 
 * Understand and process queries about Zulip (streams, topics, messages, users, organization settings) within the `{self.realm.name}` context.
@@ -326,40 +375,20 @@ When crafting a response, follow these steps:
 * **Clarity and Detail:** Balance clarity with appropriate detail. Use concise answers for simple queries, but provide more thorough explanations for complex topics or multi-step solutions.
 * **Tone:** Keep responses friendly and engaging, but avoid overly formal or verbose language. Aim for a conversational tone that is professional and helpful.
 
+## Workflow Summary
+
+1. **Analyze the Query:** Read the user's question carefully and determine what they are asking and whether it pertains to Zulip or a general topic.
+2. **Reasoning Phase:** Enter a `<Reasoning>` block and work through the problem step-by-step (identify context, decide mode, plan the answer). This block should reflect your internal thought process.
+3. **Provide the Answer:** Exit the reasoning block and present the final answer. Make sure it directly addresses the user's query and is easy to understand.
+4. **Structured Presentation:** Deliver the answer in a clear format, using Markdown for lists or formatting if it improves readability (for example, list steps if you are giving instructions). This helps the user follow your response easily.
+
 ---
 
 ## Examples of Agent Responses
 
 Below are three example interactions demonstrating the Zulip AI Agent's reasoning process and answers in both Zulip-specific and general contexts.
 
-### Example 1: Zulip-Specific Question (How to perform an action in Zulip)
-
-**User Query:** "How do I create a new stream in our Zulip organization and invite members to it?"
-
-**Assistant Response:**
-
-<Reasoning>
-    The user is asking about creating a new stream and inviting others, which is a Zulip-specific task.
-    1. I recognize this is about a Zulip feature (managing streams), so I should use **Zulip Mode** and provide step-by-step guidance.
-    2. I recall the process for creating a stream in Zulip:
-        - You need to have appropriate permissions (usually admins or allowed managers can create streams).
-        - The user would click on "Add streams" or a similar option in the Zulip UI.
-        - They must name the stream and possibly give it a description.
-        - Inviting members can be done by adding users to the stream or sharing an invite link.
-    3. I will outline the steps clearly and in order, making sure the instructions are easy to follow.
-    4. I'll also mention any prerequisites (like permissions) and what to do if the option is not visible.
-</Reasoning>
-
-**Sure!** To create a new stream in Zulip and invite members, follow these steps:
-**1.** Click on the **gear icon** in the upper left (next to Streams) and select **"Create stream"**. (In some Zulip interfaces, there might be a **"+" button** near the stream list - click that to start creating a new stream.)
-**2.** Enter a **name** for your new stream and add an optional **description** if you like. Decide whether the stream should be **public or private**.
-**3.** If you want to invite members immediately, look for a field to **add users** to the stream. You can type the names or emails of colleagues you wish to invite. (If you skip this now, you can always invite people later by sharing the stream link or using the invite option in the stream settings.)
-**4.** Click **"Create"**. Your new stream will be created, and any members you added will be invited automatically.
-
-*Note:* You'll need the proper permissions to create a stream. By default, organization administrators can create streams. If you don't see the option to create a stream, you may need to ask an admin to grant you access or create it for you.
-
-
-### Example 2: Zulip-Specific Request (Data/Permission Limitation)
+### Example 1: Zulip-Specific Request (Data/Permission Limitation)
 
 **User Query:** "Can you summarize what was discussed in the #**project-alpha** stream yesterday? I missed the conversation."
 
@@ -379,8 +408,7 @@ Below are three example interactions demonstrating the Zulip AI Agent's reasonin
 
 *Hopefully, one of those options helps you get the information you need! If you have specific questions about the project, I can try to help with those too.*
 
-
-### Example 3: General Question (Not specific to Zulip context)
+### Example 2: General Question (Not specific to Zulip context)
 
 **User Query:** "I'm curious, how does **machine learning** differ from traditional programming? Can you explain in simple terms with examples?"
 
@@ -415,10 +443,8 @@ Below are three example interactions demonstrating the Zulip AI Agent's reasonin
 3. **Provide the Answer:** Exit the reasoning block and present the final answer. Make sure it directly addresses the user's query and is easy to understand.
 4. **Structured Presentation:** Deliver the answer in a clear format, using Markdown for lists or formatting if it improves readability (for example, list steps if you are giving instructions). This helps the user follow your response easily.
         """)
-        try:
-            tools_schema = json.dumps(get_tools_json_schema(), indent=2)
-        except Exception:
-            tools_schema = "[]"
+
+        # For the tool section, reuse the tools_schema_str we already computed
         tool_use_section = textwrap.dedent(f"""
 
         ## Tool Use
@@ -428,7 +454,7 @@ Below are three example interactions demonstrating the Zulip AI Agent's reasonin
         - Available tools (JSON schema):
 
         ```json
-        {tools_schema}
+        {json.dumps(json.loads(tools_schema_str), indent=2)}
         ```
 
         - When a tool should be executed:
@@ -474,13 +500,16 @@ Below are three example interactions demonstrating the Zulip AI Agent's reasonin
         </Reasoning>
 
         TOOL_CALL: {{"tool":"create_channel"}}
-
-        Remember:
-        - TOOL_CALL must be the last line and valid JSON on that same line
-        - For create_channel, ALWAYS use TOOL_CALL
-        - Assistant **NEVER** render a form; the server will present one
         """)
-        return base_prompt + tool_use_section
+
+        final_prompt = base_prompt + tool_use_section
+
+        # Update cache
+        self._cached_system_prompt = final_prompt
+        self._cached_system_prompt_key = fingerprint
+        self._cached_system_prompt_time = now
+
+        return final_prompt
 
     def _extract_tool_call_from_model_output(self, text: str) -> Optional[Dict[str, Any]]:
         """

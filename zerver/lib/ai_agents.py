@@ -12,10 +12,18 @@ from django.conf import settings
 import textwrap
 
 from zerver.lib.ollama_client import OllamaClient, OllamaGenerateResponse, StreamingResponse
+from zerver.lib.ai_agent_tools import (
+    get_tool_by_name,
+    get_all_tools,
+    get_tools_json_schema
+)
 from zerver.models import Realm, UserProfile
 
 
 logger = logging.getLogger(__name__)
+
+# Constant for tool call prefix
+TOOL_CALL_PREFIX = "TOOL_CALL:"
 
 
 def split_reasoning_and_answer(raw: str) -> Tuple[Optional[str], str]:
@@ -85,14 +93,81 @@ class ZulipAIAgent:
         user: UserProfile,
         context: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Generate chat response using AI agent
+        """Generate chat response using AI agent with tool support
 
         Returns dict with:
         - response: The AI response text
         - tokens: Token usage information
         - conversation_history: Full conversation history
+        - tool_calls: List of any tool calls made
         """
 
+        # First check if the user submitted a filled-out form (bypass LLM for direct execution)
+        form_request = self._extract_user_form_submission(message, user)
+        if form_request:
+            return self._execute_tool(form_request, user)
+
+        # Otherwise, let the LLM decide how to respond (with or without tools)
+        return self._generate_response(message, user, context)
+
+    def _execute_tool(self, tool_request: Dict[str, Any], user: UserProfile) -> Dict[str, Any]:
+        """Execute a tool and return the result"""
+        tool_name = tool_request["tool"]
+        parameters = tool_request["parameters"]
+
+        tool = get_tool_by_name(tool_name)
+        if not tool:
+            return {
+                "response": f"I couldn't find the tool '{tool_name}'. Please try again.",
+                "tokens": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+                "conversation_history": [],
+                "tool_calls": []
+            }
+
+        # Execute the tool
+        result = tool.execute(user, self.realm, parameters)
+
+        # Format the response based on the result
+        if result.status == "success":
+            response = f"✅ {result.message}"
+        elif result.status == "permission_denied":
+            response = f"⚠️ {result.message}"
+        elif result.status == "already_exists":
+            response = f"ℹ️ {result.message}"
+        else:
+            response = f"❌ {result.message}"
+
+        # Build response with tool call details
+        tool_call_info = {
+            "tool": tool_name,
+            "parameters": parameters,
+            "result": {
+                "status": result.status,
+                "message": result.message,
+                "data": result.data
+            }
+        }
+
+        return {
+            "response": response,
+            "tokens": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            "conversation_history": [
+                {"role": "user", "content": f"Execute tool: {tool_name} with parameters: {parameters}"},
+                {"role": "assistant", "content": response}
+            ],
+            "tool_calls": [tool_call_info]
+        }
+
+    def _generate_response(
+        self,
+        message: str,
+        user: UserProfile,
+        context: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Generate a response where the LLM decides whether to use tools.
+        The LLM can either respond normally or invoke tools based on the context.
+        """
         system_prompt = self._get_system_prompt(user)
 
         # Add context if provided
@@ -108,30 +183,24 @@ class ZulipAIAgent:
                 prompt=prompt,
                 system=system_prompt,
                 temperature=0.7,
-                stream=self.stream_response,  # Use streaming if configured
-                keep_alive=self.keep_alive  # Keep model in memory
+                stream=self.stream_response,
+                keep_alive=self.keep_alive
             )
 
-            # Handle StreamingResponse
+            # Handle different response types
             if isinstance(result, StreamingResponse):
-                # Iterate through the stream to build the complete response
                 response_text = ""
                 for chunk in result:
                     response_text += chunk
-
-                # Token counts are now available after streaming completes
                 response_text = response_text.strip()
                 token_usage = result.token_usage
-
-            # Handle non-streaming response
             elif isinstance(result, OllamaGenerateResponse):
                 response_text = result.response.strip()
                 token_usage = result.token_usage
             else:
                 # Fallback for backward compatibility
                 response_text = result.strip() if isinstance(result, str) else ""
-                # Estimate token usage if not available
-                prompt_tokens = len(prompt.split()) * 1.3  # Rough estimate
+                prompt_tokens = len(prompt.split()) * 1.3
                 completion_tokens = len(response_text.split()) * 1.3
                 token_usage = {
                     "prompt_tokens": int(prompt_tokens),
@@ -139,33 +208,67 @@ class ZulipAIAgent:
                     "total_tokens": int(prompt_tokens + completion_tokens)
                 }
 
-            # Parse reasoning and answer, then format with spoiler if needed
+            # Check if the model wants to invoke a tool
+            tool_calls: List[Dict[str, Any]] = []
+            tool_request = self._extract_tool_call_from_model_output(response_text)
+
+            if tool_request:
+                # Remove the TOOL_CALL line from the response
+                response_text_clean = self._remove_tool_call_line(response_text)
+
+                # For create_channel, offer a form instead of direct execution
+                if tool_request.get("tool") == "create_channel":
+                    form_text = self._render_create_channel_form(user)
+                    response_text = (response_text_clean + "\n\n" + form_text).strip()
+                else:
+                    # Execute other tools directly
+                    tool_result = self._execute_tool(tool_request, user)
+                    tool_calls = tool_result.get("tool_calls", [])
+
+                    # Append tool result to response
+                    action_summary = tool_result.get("response", "")
+                    if action_summary:
+                        response_text = (response_text_clean + "\n\n" + action_summary).strip()
+
+            # Format response with reasoning spoiler if applicable
             reasoning, answer = split_reasoning_and_answer(response_text)
             if reasoning is not None:
-                # Format with reasoning in a spoiler block
                 formatted_response = build_spoiler_markdown(reasoning, answer)
             else:
-                # No reasoning tags found, use response as-is
                 formatted_response = response_text
 
-            # Build conversation history (store original for audit)
+            # Build conversation history
             conversation_history = [
                 {"role": "user", "content": message},
                 {"role": "assistant", "content": response_text}
             ]
 
             return {
-                "response": formatted_response,  # Return formatted response for display
+                "response": formatted_response,
                 "tokens": token_usage,
                 "conversation_history": conversation_history,
+                "tool_calls": tool_calls
             }
+
         except Exception as e:
             logger.error(f"AI chat generation failed for realm {self.realm.id}: {e}")
             return {
                 "response": "I apologize, but I'm experiencing technical difficulties. Please try again later.",
                 "tokens": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
                 "conversation_history": [],
+                "tool_calls": []
             }
+
+    def _remove_tool_call_line(self, text: str) -> str:
+        """Remove the TOOL_CALL line from the response text."""
+        lines = text.strip().splitlines()
+
+        for idx in range(len(lines) -1, -1, -1):
+            if lines[idx].strip().startswith(TOOL_CALL_PREFIX):
+                del lines[idx]
+                return "\n".join(lines).rstrip()
+
+        return text
 
     def _get_system_prompt(self, user: UserProfile) -> str:
         """Get system prompt based on agent type"""
@@ -182,10 +285,6 @@ class ZulipAIAgent:
 1. **Zulip Mode:** If the user's request is about Zulip (e.g. managing messages/threads/streams/users, or mentions `@` references relevant to the current channel/topic), you **must** respond in Zulip Mode with context-aware assistance.
 2. **General Chat Mode:** If the user's request is not related to Zulip-specific context, respond in General Chat Mode, providing a helpful answer based on general knowledge.
 
-## Failure Policy
-
-If a requested operation cannot be performed (for example, it requires access or permissions you don't have), **clearly state the limitation** and suggest a workaround or alternative solution.
-
 ## Background
 
 Zulip is a group chat platform used by the **{self.realm.name}** organization. You are an AI assistant integrated into this Zulip platform to support users. Your purpose is to provide thoughtful, well-reasoned help with both Zulip-related questions and general queries from users in the organization.
@@ -201,31 +300,11 @@ When crafting a response, follow these steps:
 1. **Analyze:** Understand the user's query and break it down into the core issue or question. Identify any constraints or specific details.
 2. **`<Reasoning>` Block:** Provide a reasoning section encapsulating your step-by-step internal monologue. For example:
 
-   * Identify relevant Zulip context (if any) such as specific users, streams, or settings mentioned in the query.
+   * Briefly analyze the request to determine its relevance to the Zulip context, such as specific users, streams, settings, or if it's a general inquiry.
    * Decide which mode to use (Zulip-specific help vs. general answer) based on the query.
    * Plan the steps or information needed to answer the question thoroughly.
      *(This entire reasoning process should be wrapped in `<Reasoning>...</Reasoning>` tags.)*
 3. **Formulate Final Answer:** Outside the reasoning block, present a clear and concise answer or solution to the user's question. This is the response the user will focus on, so ensure it directly addresses their query with accurate information.
-
-## Example Response Structure
-
-<Reasoning>
-    The user has asked for a summary of a long document.
-    1. First, I will identify the key sections of the document.
-    2. Next, I'll extract the main points from each section.
-    3. Then, I will synthesize those points into a concise summary.
-    By following these steps, the summary will cover all important content in an easy-to-understand way.
-</Reasoning>
-
-> ...Your final answer summarizing the document goes here... <
-
-*(In the above example, the `<Reasoning>` section shows the thought process, and the final answer (outside the tags) provides the summary.)*
-
-## Profile
-
-* **Author:** Helpful AI Assistant (integrated into the Zulip platform for `{self.realm.name}`)
-* **Version:** Current deployed version within `{self.realm.name}`
-* **Description:** A general-purpose AI assistant capable of structured reasoning and helpful responses in various domains.
 
 ## Skills
 
@@ -246,17 +325,6 @@ When crafting a response, follow these steps:
 * **Contextual Accuracy:** Ground your answers in factual information and best practices, especially for Zulip-related queries relevant to `{self.realm.name}`'s environment.
 * **Clarity and Detail:** Balance clarity with appropriate detail. Use concise answers for simple queries, but provide more thorough explanations for complex topics or multi-step solutions.
 * **Tone:** Keep responses friendly and engaging, but avoid overly formal or verbose language. Aim for a conversational tone that is professional and helpful.
-
-## Workflow Summary
-
-1. **Analyze the Query:** Read the user's question carefully and determine what they are asking and whether it pertains to Zulip or a general topic.
-2. **Reasoning Phase:** Enter a `<Reasoning>` block and work through the problem step-by-step (identify context, decide mode, plan the answer). This block should reflect your internal thought process.
-3. **Provide the Answer:** Exit the reasoning block and present the final answer. Make sure it directly addresses the user's query and is easy to understand.
-4. **Structured Presentation:** Deliver the answer in a clear format, using Markdown for lists or formatting if it improves readability (for example, list steps if you are giving instructions). This helps the user follow your response easily.
-
-## Initialization
-
-Welcome! I am ready to assist. Please let me know what you need, and I'll think through your request carefully.
 
 ---
 
@@ -340,8 +408,356 @@ Below are three example interactions demonstrating the Zulip AI Agent's reasonin
 
 *In summary, traditional programming is explicitly telling the computer what to do, whereas machine learning lets the computer learn from examples. This means ML can adapt to new patterns better (with enough data), but it also requires training data and might not always explain **why** it made a decision.*
 
+## Workflow Summary
+
+1. **Analyze the Query:** Read the user's question carefully and determine what they are asking and whether it pertains to Zulip or a general topic.
+2. **Reasoning Phase:** Enter a `<Reasoning>` block and work through the problem step-by-step (identify context, decide mode, plan the answer). This block should reflect your internal thought process.
+3. **Provide the Answer:** Exit the reasoning block and present the final answer. Make sure it directly addresses the user's query and is easy to understand.
+4. **Structured Presentation:** Deliver the answer in a clear format, using Markdown for lists or formatting if it improves readability (for example, list steps if you are giving instructions). This helps the user follow your response easily.
         """)
-        return base_prompt
+        try:
+            tools_schema = json.dumps(get_tools_json_schema(), indent=2)
+        except Exception:
+            tools_schema = "[]"
+        tool_use_section = textwrap.dedent(f"""
+
+        ## Tool Use
+
+        In the **Zulip Model**, you can request the server to execute tools when user intent matches a supported capability.
+
+        - Available tools (JSON schema):
+
+        ```json
+        {tools_schema}
+        ```
+
+        - When a tool should be executed:
+            1. Think and explain in <Reasoning>.
+            2. Provide a brief answer text for transparency.
+            3. Append as the final line of your message:
+                TOOL_CALL: {{"tool": "<tool_name>"}}
+
+        ## Critical Rules for create_channel:
+        - Assistant should **NEVER** render a form; the server will present one
+        - When the user asks to create/make/add a channel/stream, **ALWAYS** output a TOOL_CALL as the last line
+        - Do not include any markdown lists, bullets, or pseudo-forms for channel creation
+        - The server will present a properly formatted form with available privacy options
+
+        ## Examples:
+
+        ### Example 1: User requests channel creation without parameters
+
+        **User Query:** Help me create a channel.
+
+        **Assistant Response:**
+
+        <Reasoning>
+            The user is asking to create a channel.
+            1. This is a Zulip-specific request, so I will respond in Zulip Mode.
+            2. I need to use the create_channel tool to assist with this request.
+            3. I'll call the `create_channel` tool to create the channel for the user.
+        </Reasoning>
+
+        TOOL_CALL: {{"tool":"create_channel"}}
+
+        ### Example 2: User requests channel creation including parameters
+
+        **User Query:** Create a "features" channel.
+
+        **Assistant Response:**
+
+        <Reasoning>
+            The user is asking to create a channel.
+            1. This is a Zulip-specific request, so I will respond in Zulip Mode.
+            2. I need to use the create_channel tool to assist with this request.
+            3. I'll call the `create_channel` tool to create the channel for the user.
+        </Reasoning>
+
+        TOOL_CALL: {{"tool":"create_channel"}}
+
+        Remember:
+        - TOOL_CALL must be the last line and valid JSON on that same line
+        - For create_channel, ALWAYS use TOOL_CALL
+        - Assistant **NEVER** render a form; the server will present one
+        """)
+        return base_prompt + tool_use_section
+
+    def _extract_tool_call_from_model_output(self, text: str) -> Optional[Dict[str, Any]]:
+        """
+        Extract a tool call from the model output if present.
+        Expected format on the last line of the message:
+            TOOL_CALL: {"tool":"<name>"}
+        """
+        try:
+            lines = text.strip().splitlines()
+            # Find the last occurrence anywhere
+            match_idx = None
+            for idx in range(len(lines) -1, -1, -1):
+                if lines[idx].strip().startswith(TOOL_CALL_PREFIX):
+                    match_idx = idx
+                    break
+
+            if match_idx is None:
+                return None
+
+            json_part = lines[match_idx].strip()[len(TOOL_CALL_PREFIX):]
+            # Try to parse the JSON
+            data = json.loads(json_part)
+            if isinstance(data, dict) and "tool" in data:
+                data["parameters"] = {}
+                return data
+            return None
+
+        except Exception as e:
+            logger.debug(f"Failed to parse TOOL_CALL: {e}")
+            return None
+
+    def _extract_user_form_submission(self, message: str, user: UserProfile) -> Optional[Dict[str, Any]]:
+        """
+        Check if the user submitted a form (JSON or list format) for direct tool execution.
+        This bypasses the LLM and executes the tool directly.
+
+        Returns:
+            Dict with tool and parameters if a form is detected, None otherwise
+        """
+        # Try JSON format first
+        json_result = self._extract_json_form_submission(message)
+        if json_result:
+            return json_result
+
+        # Try list format for channel creation
+        list_result = self._extract_list_form_submission(message, user)
+        if list_result:
+            return list_result
+
+        return None
+
+    def _extract_json_form_submission(self, message: str) -> Optional[Dict[str, Any]]:
+        """
+        Extract a JSON form submission for tool execution.
+
+        Expected structure:
+            {
+                "tool": "<tool_name>",
+                "parameters": { ... }
+            }
+        """
+        # Try to find a fenced code block first
+        fence_patterns = [
+            r"```json\s*([\s\S]*?)```",
+            r"```\s*([\s\S]*?)```",
+        ]
+        candidates: List[str] = []
+
+        for pat in fence_patterns:
+            m = re.search(pat, message, flags=re.IGNORECASE)
+            if m:
+                candidates.append(m.group(1).strip())
+
+        # Also consider the whole message as a JSON candidate
+        candidates.append(message.strip())
+
+        for candidate in candidates:
+            try:
+                data = json.loads(candidate)
+                if isinstance(data, dict) and "tool" in data:
+                    tool_name = data.get("tool")
+                    params = data.get("parameters", {})
+                    # Validate tool exists
+                    if isinstance(tool_name, str) and get_tool_by_name(tool_name):
+                        return {"tool": tool_name, "parameters": params if isinstance(params, dict) else {}}
+            except Exception:
+                continue
+
+        return None
+
+    def _extract_list_form_submission(self, message: str, user: UserProfile) -> Optional[Dict[str, Any]]:
+        """
+        Extract channel creation parameters from a list-format form submission.
+
+        Expected format:
+            1. Channel Name: <name>
+            2. Description: <description>
+            3. Privacy: <privacy option or number>
+        """
+        lines = message.strip().split('\n')
+
+        # Check if this looks like a form submission (has numbered items)
+        if len(lines) < 2 or not any(re.match(r'^[\d\.\)]+\s*', line) for line in lines):
+            return None
+
+        # Initialize parameters
+        params = {}
+        privacy_choices = self._build_privacy_choices(user)
+
+        for line in lines:
+            line = line.strip()
+            # Remove bullets, numbers, asterisks
+            line = re.sub(r'^[\d\*\-\•\.\)]+\s*', '', line)
+
+            # Channel name patterns
+            if re.match(r'channel\s*name\s*:', line, re.IGNORECASE):
+                match = re.search(r'channel\s*name\s*:\s*(.+)', line, re.IGNORECASE)
+                if match:
+                    name = match.group(1).strip().strip('"\'*_')
+                    if name:
+                        params["name"] = name
+
+            # Description patterns
+            elif re.match(r'description\s*:', line, re.IGNORECASE):
+                match = re.search(r'description\s*:\s*(.+)', line, re.IGNORECASE)
+                if match:
+                    desc = match.group(1).strip().strip('"\'*_')
+                    params["description"] = desc
+
+            # Privacy patterns
+            elif re.match(r'privacy.*:', line, re.IGNORECASE):
+                match = re.search(r'privacy.*:\s*(.+)', line, re.IGNORECASE)
+                if match:
+                    privacy_value = match.group(1).strip().strip('"\'*_[]')
+
+                    # Check if it's a numeric selection
+                    if privacy_value.isdigit():
+                        choice_index = int(privacy_value) - 1  # Convert to 0-based index
+                        if 0 <= choice_index < len(privacy_choices):
+                            choice = privacy_choices[choice_index]
+                            params["privacy"] = choice["privacy"]
+                            if choice["history_public_to_subscribers"] is not None:
+                                params["history_public_to_subscribers"] = choice["history_public_to_subscribers"]
+                    else:
+                        # Text matching for privacy values
+                        privacy_value_lower = privacy_value.lower()
+                        if 'public' in privacy_value_lower and 'web' not in privacy_value_lower:
+                            params["privacy"] = "public"
+                        elif 'web' in privacy_value_lower and 'public' in privacy_value_lower:
+                            params["privacy"] = "web_public"
+                        elif 'private' in privacy_value_lower:
+                            params["privacy"] = "private"
+                            # Determine history visibility
+                            if 'protected' in privacy_value_lower:
+                                params["history_public_to_subscribers"] = False
+                            elif 'shared' in privacy_value_lower:
+                                params["history_public_to_subscribers"] = True
+                            else:
+                                # Default for private is shared history
+                                params["history_public_to_subscribers"] = True
+
+        # Only return if we have at least a channel name (indicates form submission)
+        if params.get("name"):
+            # Set defaults for missing fields
+            if "description" not in params:
+                params["description"] = ""
+            if "privacy" not in params:
+                params["privacy"] = "public"
+
+            return {
+                "tool": "create_channel",
+                "parameters": params
+            }
+
+        return None
+
+    def _compute_allowed_privacy_options(self, user: UserProfile) -> List[str]:
+        """
+        Compute which privacy options the requesting user is allowed to use in this realm.
+        """
+        allowed: List[str] = []
+        try:
+            # public
+            if hasattr(user, "can_create_public_streams") and user.can_create_public_streams(self.realm):
+                allowed.append("public")
+            # private
+            if hasattr(user, "can_create_private_streams") and user.can_create_private_streams(self.realm):
+                allowed.append("private")
+            # web_public
+            if hasattr(self.realm, "web_public_streams_enabled") and self.realm.web_public_streams_enabled():
+                if hasattr(user, "can_create_web_public_streams") and user.can_create_web_public_streams():
+                    allowed.append("web_public")
+        except Exception:
+            # If any check fails, fall back to conservative defaults
+            pass
+        # If nothing computed, default to public to let the CreateChannelTool enforce exact permissions later
+        return allowed or ["public"]
+
+    def _build_privacy_choices(self, user: UserProfile) -> List[Dict[str, Any]]:
+        """
+        Build a list of privacy choices available to the user.
+        Returns a list of dicts with 'label', 'privacy', and 'history_public_to_subscribers'.
+        """
+        allowed = self._compute_allowed_privacy_options(user)
+        choices = []
+
+        if "public" in allowed:
+            choices.append({
+                "label": "Public",
+                "privacy": "public",
+                "history_public_to_subscribers": None
+            })
+
+        if "web_public" in allowed:
+            choices.append({
+                "label": "Web-public",
+                "privacy": "web_public",
+                "history_public_to_subscribers": None
+            })
+
+        if "private" in allowed:
+            choices.append({
+                "label": "Private, shared history",
+                "privacy": "private",
+                "history_public_to_subscribers": True
+            })
+            choices.append({
+                "label": "Private, protected history",
+                "privacy": "private",
+                "history_public_to_subscribers": False
+            })
+
+        return choices
+
+    def _render_create_channel_form(self, user: UserProfile) -> str:
+        """
+        Render a list-style form for creating a channel with numbered privacy options.
+        """
+        privacy_choices = self._build_privacy_choices(user)
+
+        # Build the form text
+        form_lines = [
+            "To create a channel, please fill out the following:",
+            "1. Channel Name: ",
+            "2. Description: ",
+            "3. Privacy (choose one): "
+        ]
+
+        for i, choice in enumerate(privacy_choices, start=1):
+            form_lines.append(f"   [{i}] {choice['label']}")
+
+        form_lines.extend([
+            "",
+            "```quote",
+            "**Notes:**"
+        ])
+
+        # Add descriptions for the privacy options that are available
+        added_descriptions = set()
+        for choice in privacy_choices:
+            label = choice['label']
+            if "Public" in label and "Public" not in added_descriptions:
+                form_lines.append("* **Public:** *Members of your organization can view messages and join.*")
+                added_descriptions.add("Public")
+            elif "Web-public" in label and "Web-public" not in added_descriptions:
+                form_lines.append("* **Web-public:** *Anyone on the internet can view messages; members of your organization can join.*")
+                added_descriptions.add("Web-public")
+            elif "Private, shared history" in label and "Private, shared" not in added_descriptions:
+                form_lines.append("* **Private, shared history:** *Joining and viewing messages requires being invited; new subscribers can see past messages.*")
+                added_descriptions.add("Private, shared")
+            elif "Private, protected history" in label and "Private, protected" not in added_descriptions:
+                form_lines.append("* **Private, protected history:** *Joining and viewing messages requires being invited; users can only view messages sent while they were subscribed.*")
+                added_descriptions.add("Private, protected")
+
+        form_lines.append("```")
+
+        return "\n".join(form_lines)
 
     def generate_embeddings(self, text: str) -> List[float]:
         """Generate embeddings for text similarity/search"""

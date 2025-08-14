@@ -124,7 +124,7 @@ class OllamaClient:
         context: Optional[List[int]] = None,
         temperature: float = 0.7,
         stream: bool = False,  # Defaults to False (non-streaming)
-        keep_alive: str = "10m",  # Keep model in memory for 10 minutes
+        keep_alive: str = "24h",  # Keep model in memory for 24 hours
         return_raw: bool = False,  # For backward compatibility
     ) -> Union[OllamaGenerateResponse, StreamingResponse, str, Iterator[str]]:
         """Generate text using specified model

@@ -3,6 +3,7 @@ from django.db import transaction
 from django.db.models import Count
 from django.utils.translation import gettext as _
 from django.utils.translation import override as override_language
+import re
 
 from zerver.actions.create_realm import setup_realm_internal_bots
 from zerver.actions.message_send import (
@@ -11,10 +12,274 @@ from zerver.actions.message_send import (
     internal_send_private_message,
 )
 from zerver.actions.reactions import do_add_reaction
+from zerver.lib.streams import create_stream_if_needed
+from zerver.lib.string_validation import check_stream_name
+from zerver.actions.user_groups import create_user_group_in_database
 from zerver.lib.emoji import get_emoji_data
 from zerver.lib.message import SendMessageRequest, remove_single_newlines
-from zerver.models import Message, OnboardingUserMessage, Realm, UserProfile
+from zerver.lib.streams import get_stream
+from zerver.models import Message, OnboardingUserMessage, Realm, UserProfile, UserGroup, Stream, Recipient
 from zerver.models.users import get_system_bot
+from django.db.models import Q
+from typing import List, Dict, Any
+
+
+def extract_search_terms_with_ai(query: str, realm: Realm) -> List[str]:
+    """
+    Use AI to intelligently extract search terms and categories from user query.
+    """
+    try:
+        from zerver.lib.ai_agents_openai import ZulipAIAgent
+        from django.conf import settings
+        
+        ai_agent = ZulipAIAgent(realm)
+        
+        prompt = f"""
+        Analyze this user query and extract relevant search terms and categories: "{query}"
+        
+        Your task:
+        1. Identify what category/topic the user is asking about (e.g., food, technology, work, entertainment, etc.)
+        2. Generate 5-10 relevant search terms that would help find related messages
+        3. Include synonyms, related words, and common variations
+        4. Return only the search terms as a comma-separated list, no explanations
+        
+        Examples:
+        - "Any restaurant recommendations?" → restaurant, food, recommend, suggest, place, eat, dining, cuisine, meal, good
+        - "What movies should I watch?" → movie, film, watch, recommend, cinema, entertainment, show, series, streaming, good
+        - "Need help with coding" → code, programming, development, bug, error, help, software, debug, solution, fix
+        
+        Query: "{query}"
+        Search terms:
+        """
+        
+        response = ai_agent.chat(
+            message=prompt,
+            user=None,
+            context="",
+            agent_type="search_assistant",
+            use_vector_context=False
+        )
+        
+        if response:
+            # Extract terms from AI response
+            terms = [term.strip().lower() for term in response.split(',')]
+            return [term for term in terms if len(term) > 2][:10]  # Limit to 10 terms
+            
+    except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.warning(f"AI search term extraction failed: {e}")
+    
+    # Fallback to basic extraction
+    words = query.lower().replace("?", "").replace("!", "").split()
+    return [word for word in words if len(word) > 2]
+
+
+def suggest_target_channel(realm: Realm, message_content: str, sender_email: str) -> Dict[str, Any]:
+    """
+    Suggest the best channel to send a message to based on content and chat history.
+    """
+    try:
+        # Use AI to extract topics and keywords from the message
+        search_terms = extract_search_terms_with_ai(message_content, realm)
+        
+        if not search_terms:
+            return {}
+        
+        # Build search query to find channels with similar discussions
+        q_objects = Q()
+        for term in search_terms:
+            q_objects |= Q(content__icontains=term)
+        
+        # Find messages in streams on similar topics
+        messages = Message.objects.filter(
+            realm=realm,
+            recipient__type=Recipient.STREAM,  # Only stream messages
+        ).filter(q_objects).exclude(
+            sender__email=sender_email  # Exclude the current user
+        ).exclude(
+            sender__email__endswith='welcome-bot@zulip.com'  # Exclude bots
+        ).select_related('sender', 'recipient').order_by('-date_sent')[:50]
+        
+        # Count activity by channel to find most relevant
+        channel_activity = {}
+        for msg in messages:
+            try:
+                stream = Stream.objects.get(recipient=msg.recipient)
+                stream_key = stream.name
+                if stream_key not in channel_activity:
+                    channel_activity[stream_key] = {
+                        'stream': stream,
+                        'message_count': 0,
+                        'recent_messages': [],
+                        'last_message_date': msg.date_sent,
+                        'participants': set()
+                    }
+                channel_activity[stream_key]['message_count'] += 1
+                channel_activity[stream_key]['participants'].add(msg.sender.full_name)
+                if len(channel_activity[stream_key]['recent_messages']) < 3:
+                    channel_activity[stream_key]['recent_messages'].append(msg.content[:100])
+            except Stream.DoesNotExist:
+                continue
+        
+        # Find the most active channel for this topic
+        if channel_activity:
+            best_channel = max(
+                channel_activity.values(), 
+                key=lambda x: (x['message_count'], x['last_message_date'])
+            )
+            
+            return {
+                'channel_name': best_channel['stream'].name,
+                'stream_id': best_channel['stream'].id,
+                'message_count': best_channel['message_count'],
+                'participants': list(best_channel['participants'])[:5],
+                'recent_messages': best_channel['recent_messages'],
+                'last_active': best_channel['last_message_date'].strftime('%Y-%m-%d %H:%M')
+            }
+        
+        return {}
+        
+    except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Error suggesting target channel: {e}")
+        return {}
+
+
+def suggest_message_recipients(realm: Realm, message_content: str, sender_email: str, limit: int = 3) -> List[Dict[str, Any]]:
+    """
+    Suggest relevant people to send a message to based on chat history and message content.
+    """
+    try:
+        # Use AI to extract topics and keywords from the message
+        search_terms = extract_search_terms_with_ai(message_content, realm)
+        
+        if not search_terms:
+            return []
+        
+        # Build search query to find users who have discussed similar topics
+        q_objects = Q()
+        for term in search_terms:
+            # Clean up the term and make search more specific for Python
+            clean_term = term.strip('",').lower()
+            if clean_term in ['python', 'learn', 'coding', 'programming', 'help']:
+                q_objects |= Q(content__icontains=clean_term)
+        
+        # If no relevant terms found, fallback to direct keyword search
+        if not q_objects:
+            # Extract key topics from the message content
+            content_lower = message_content.lower()
+            if 'python' in content_lower:
+                q_objects |= Q(content__icontains='python')
+            if 'learn' in content_lower or 'help' in content_lower:
+                q_objects |= Q(content__icontains='help') | Q(content__icontains='learn')
+        
+        # Find messages from other users on similar topics
+        messages = Message.objects.filter(
+            realm=realm,
+            recipient__type=Recipient.STREAM,  # Only stream messages
+        ).filter(q_objects).exclude(
+            sender__email=sender_email  # Exclude the current user
+        ).exclude(
+            sender__email__endswith='welcome-bot@zulip.com'  # Exclude bots
+        ).select_related('sender', 'recipient').order_by('-date_sent')[:50]
+        
+        # Count message frequency by user to find most active participants
+        user_activity = {}
+        for msg in messages:
+            user_key = msg.sender.email
+            if user_key not in user_activity:
+                user_activity[user_key] = {
+                    'user': msg.sender,
+                    'message_count': 0,
+                    'recent_topics': [],
+                    'last_message_date': msg.date_sent
+                }
+            user_activity[user_key]['message_count'] += 1
+            if len(user_activity[user_key]['recent_topics']) < 3:
+                user_activity[user_key]['recent_topics'].append(msg.content[:100])
+        
+        # Sort by activity and return top suggestions
+        sorted_users = sorted(
+            user_activity.values(), 
+            key=lambda x: (x['message_count'], x['last_message_date']), 
+            reverse=True
+        )[:limit]
+        
+        suggestions = []
+        for user_data in sorted_users:
+            suggestions.append({
+                'user_name': user_data['user'].full_name,
+                'user_email': user_data['user'].email,
+                'message_count': user_data['message_count'],
+                'recent_topics': user_data['recent_topics'],
+                'last_active': user_data['last_message_date'].strftime('%Y-%m-%d %H:%M')
+            })
+        
+        return suggestions
+        
+    except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Error suggesting message recipients: {e}")
+        return []
+
+
+def search_messages_in_database(realm: Realm, query: str, limit: int = 10, exclude_sender_email: str = None) -> List[Dict[str, Any]]:
+    """
+    Search for messages in the database based on the query using AI-powered term extraction.
+    Returns a list of dictionaries with message information.
+    """
+    try:
+        # Use AI to extract intelligent search terms
+        search_terms = extract_search_terms_with_ai(query, realm)
+        
+        if not search_terms:
+            return []
+        
+        # Build search query
+        q_objects = Q()
+        for term in search_terms:
+            q_objects |= Q(content__icontains=term)
+        
+        # Search messages in streams (not private messages)
+        messages_query = Message.objects.filter(
+            realm=realm,
+            recipient__type=Recipient.STREAM,  # Only stream messages
+        ).filter(q_objects).select_related('sender', 'recipient')
+        
+        # Exclude welcome bot messages and optionally the requesting user
+        messages_query = messages_query.exclude(sender__email__endswith='welcome-bot@zulip.com')
+        if exclude_sender_email:
+            messages_query = messages_query.exclude(sender__email=exclude_sender_email)
+            
+        messages = messages_query.order_by('-date_sent')[:limit]
+        
+        results = []
+        for msg in messages:
+            try:
+                # Get stream info
+                stream = Stream.objects.get(recipient=msg.recipient)
+                results.append({
+                    'content': msg.content,
+                    'sender': msg.sender.full_name,
+                    'stream': stream.name,
+                    'stream_id': stream.id,
+                    'topic': msg.topic_name(),
+                    'date': msg.date_sent.strftime('%Y-%m-%d %H:%M'),
+                    'message_id': msg.id
+                })
+            except Stream.DoesNotExist:
+                continue
+        
+        return results
+        
+    except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f"Error searching messages: {e}")
+        return []
 
 
 def missing_any_realm_internal_bots() -> bool:
@@ -131,6 +396,7 @@ def bot_commands(no_help_command: bool = False) -> str:
         "topics",
         "message formatting",
         "keyboard shortcuts",
+        "create chat",
     ]
     if not no_help_command:
         commands.append("help")
@@ -209,22 +475,52 @@ def send_welcome_bot_response(send_request: SendMessageRequest) -> None:
     """Given the send_request object for a direct message from the user
     to welcome-bot, trigger the welcome-bot reply."""
     welcome_bot = get_system_bot(settings.WELCOME_BOT, send_request.realm.id)
-    human_response_lower = send_request.message.content.lower()
-    human_user_recipient_id = send_request.message.sender.recipient_id
+    human_message = send_request.message.content
+    human_response_lower = human_message.lower()
+    human_user = send_request.message.sender
+    human_user_recipient_id = human_user.recipient_id
     assert human_user_recipient_id is not None
     
-    # Check if AI agents are enabled and try to use Ollama
+    # Import our chat creation functions
+    from zerver.lib.chat_creation import detect_chat_creation_request, create_channel, create_chat_group
+    
+    # Check for chat creation requests first
+    is_creation_request, chat_name = detect_chat_creation_request(human_message)
+    if is_creation_request and chat_name:
+        # Try to create the channel with topic keywords for adding relevant users
+        from zerver.lib.chat_creation import create_channel
+        success, message, stream = create_channel(send_request.realm, human_user, chat_name, topic_keywords=chat_name)
+        
+        if success and stream:
+            # Add clickable channel link to the response
+            channel_link = f"#**{chat_name}**"
+            enhanced_message = f"{message}\n\nYou can access your new channel here: {channel_link}"
+            response_message = enhanced_message
+        else:
+            response_message = message
+        
+        # Send response about channel creation
+        internal_send_private_message(
+            welcome_bot,
+            human_user,
+            remove_single_newlines(response_message),
+            disable_external_notifications=True,
+        )
+        return
+    
+    # Check if AI agents are enabled and try to use OpenAI
     ai_enabled = getattr(settings, "AI_AGENTS_ENABLED", False)
     content = None
     
     # Log AI status for debugging
     import logging
     logger = logging.getLogger(__name__)
-    logger.info(f"Welcome Bot AI check - Enabled: {ai_enabled}, User: {send_request.message.sender.full_name}, Message: {send_request.message.content}")
+    logger.info(f"Welcome Bot AI check - Enabled: {ai_enabled}, User: {human_user.full_name}, Message: {human_message}")
     
     if ai_enabled:
         try:
-            from zerver.lib.ai_agents import ZulipAIAgent, OllamaConnectionError, OllamaModelError
+            from zerver.lib.ai_agents_openai import ZulipAIAgent
+            from zerver.lib.openai_client import OpenAIConnectionError, OpenAIModelError
             
             # Create AI agent for welcome bot responses
             ai_agent = ZulipAIAgent(send_request.realm)
@@ -234,20 +530,23 @@ def send_welcome_bot_response(send_request: SendMessageRequest) -> None:
             logger.info(f"AI system health check: {ai_healthy}")
             
             if ai_healthy:
-                # Build context for AI
+                # Build context for AI with conversation history awareness
                 context = f"""
                 You are the Welcome Bot in Zulip, a team collaboration platform. 
-                You are helping a new user named {send_request.message.sender.full_name} 
+                You are helping a user named {human_user.full_name} 
                 in the {send_request.realm.name} organization.
                 
                 Your role is to:
-                1. Help new users understand how to use Zulip
+                1. Help users understand how to use Zulip
                 2. Answer questions about Zulip features
                 3. Provide helpful guidance for getting started
                 4. Be friendly and welcoming
-                5. Use vector database context to provide more relevant responses
+                5. Use retrieved conversation history to provide personalized, contextually relevant responses
+                6. Remember previous interactions with this user when appropriate
+                7. Help users create channels when they request it
+                8. Search for and link to relevant messages when users ask about specific topics or content
                 
-                The user's message is: "{send_request.message.content}"
+                The user's message is: "{human_message}"
                 
                 If the user asks about specific Zulip features, provide helpful explanations.
                 If they ask for help with commands, you can mention these common commands:
@@ -259,10 +558,30 @@ def send_welcome_bot_response(send_request: SendMessageRequest) -> None:
                 - "topics" - How topics work in Zulip
                 - "keyboard shortcuts" - Navigation shortcuts
                 - "formatting" - Message formatting options
+                - "create chat" - Create a new channel
                 
-                IMPORTANT: You have access to a vector database with similar messages and conversations.
-                Use this context to provide more personalized and relevant responses based on the organization's
-                communication patterns and previous discussions.
+                SPECIAL COMMAND: If the user asks you to create a chat or channel, you can now do this!
+                Examples of creation requests:
+                - "create a chat called team-chat"
+                - "make a new channel project-updates"
+                - "create channel marketing"
+                - "start a new group design-team"
+                
+                CONVERSATION HISTORY GUIDELINES:
+                1. You have access to previous conversations between users and the bot.
+                2. Use this conversation history to maintain continuity and context.
+                3. If you see relevant past interactions in the retrieved context, reference them naturally.
+                4. Don't repeat yourself if you see you've already explained something to this user.
+                5. If the user is continuing a previous conversation, acknowledge that appropriately.
+                6. Always prioritize directly answering the current question over repeating old information.
+                
+                SEARCH AND LINKING GUIDELINES:
+                When users ask about finding specific content (like "anyone mention restaurants?"), you should:
+                1. Search through the retrieved conversation history for relevant messages
+                2. Provide direct quotes or summaries of relevant messages you find
+                3. Include the sender's name and approximate time when possible
+                4. If you find relevant messages, present them clearly with context
+                5. If no relevant messages are found in the retrieved context, suggest using Zulip's search feature
                 
                 Keep your responses concise, helpful, and welcoming.
                 """
@@ -271,31 +590,211 @@ def send_welcome_bot_response(send_request: SendMessageRequest) -> None:
                 ai_agent.context_limit = getattr(settings, "WELCOME_BOT_VECTOR_CONTEXT_LIMIT", 3)
                 ai_agent.context_threshold = getattr(settings, "WELCOME_BOT_VECTOR_THRESHOLD", 0.5)
                 
-                # Generate AI response
-                logger.info("Generating AI response with vector database context...")
-                ai_response = ai_agent.chat(
-                    message=send_request.message.content,
-                    user=send_request.message.sender,
-                    context=context,
-                    agent_type="welcome_bot",
-                    use_vector_context=getattr(settings, "WELCOME_BOT_USE_VECTOR_DB", True),
-                )
-                logger.info(f"AI response received: {ai_response[:100]}...")
+                # Check if this is a channel sending request
+                is_channel_send_request = any(keyword in human_message.lower() for keyword in [
+                    "send to channel", "post to channel", "send message to", "post in channel",
+                    "suggest channel for", "which channel should i send", "send this to", "send to"
+                ])
                 
-                # Use AI response if it's reasonable
-                if ai_response and len(ai_response.strip()) > 10:
-                    content = ai_response
-                    # Log successful AI usage
-                    import logging
-                    logger = logging.getLogger(__name__)
-                    logger.info(f"AI welcome bot used for user {send_request.message.sender.full_name}: {ai_response[:100]}...")
-                else:
-                    # Log why AI response was not used
-                    import logging
-                    logger = logging.getLogger(__name__)
-                    logger.warning(f"AI response too short or empty: '{ai_response}'")
+                # Also check for pattern like 'send "message" to channel about topic' or 'send "message" to "channel"'
+                if not is_channel_send_request and "send" in human_message.lower():
+                    is_channel_send_request = (any(word in human_message.lower() for word in ["channel", "stream"]) or 
+                                             ('"' in human_message and " to " in human_message.lower()))
+                
+                # Check if this is a recipient suggestion request
+                is_suggestion_request = any(keyword in human_message.lower() for keyword in [
+                    "who should i send", "who to send", "suggest recipient", "recommend recipient", 
+                    "who would be interested", "who knows about", "who can help with", "who can i send"
+                ])
+                
+                # Also check if user is asking about people in context of topics
+                if not is_suggestion_request:
+                    is_suggestion_request = ("who" in human_message.lower() and 
+                                           any(word in human_message.lower() for word in ["about", "help", "interested", "knows", "send", "can"]))
+                
+                if is_channel_send_request and not is_suggestion_request:
+                    # Extract the message content to send and target channel/user
+                    message_to_send = None
+                    target_channel = None
+                    target_user = None
                     
-        except (OllamaConnectionError, OllamaModelError) as e:
+                    # Look for quoted message content
+                    if '"' in human_message:
+                        start = human_message.find('"')
+                        end = human_message.find('"', start + 1)
+                        if end != -1:
+                            message_to_send = human_message[start+1:end]
+                            
+                            # Look for target after the quoted message
+                            remaining = human_message[end+1:].strip()
+                            
+                            # Check for @mention (direct message to user)
+                            if 'to @' in remaining:
+                                mention_start = remaining.find('@') + 1
+                                # Extract username after @
+                                mention_end = len(remaining)
+                                for i, char in enumerate(remaining[mention_start:], mention_start):
+                                    if char in [' ', '\n', '\t']:
+                                        mention_end = i
+                                        break
+                                target_user = remaining[mention_start:mention_end]
+                            elif 'to "' in remaining:
+                                # Extract quoted channel name
+                                channel_start = remaining.find('"')
+                                channel_end = remaining.find('"', channel_start + 1)
+                                if channel_end != -1:
+                                    target_channel = remaining[channel_start+1:channel_end]
+                    
+                    if message_to_send:
+                        # Check if sending to a specific user via @mention
+                        if target_user:
+                            try:
+                                # Find the user by name
+                                recipient_user = UserProfile.objects.get(
+                                    realm=send_request.realm,
+                                    full_name__iexact=target_user,
+                                    is_active=True
+                                )
+                                
+                                # Send direct message to the user
+                                internal_send_private_message(
+                                    send_request.message.sender,
+                                    recipient_user,
+                                    message_to_send,
+                                    disable_external_notifications=True,
+                                )
+                                content = f"✅ I've sent your message \"{message_to_send}\" directly to @{target_user}!"
+                                logger.info(f"Sent direct message '{message_to_send}' to user {target_user} for user {send_request.message.sender.full_name}")
+                            except UserProfile.DoesNotExist:
+                                content = f"❌ User @{target_user} not found. Please check the username and try again."
+                            except Exception as e:
+                                content = f"❌ Failed to send message to @{target_user}: {str(e)}"
+                                logger.error(f"Failed to send direct message: {e}")
+                        elif target_channel:
+                            # Send directly to specified channel
+                            try:
+                                internal_send_stream_message_by_name(
+                                    send_request.realm,
+                                    send_request.message.sender,
+                                    target_channel,
+                                    "general",  # Default topic
+                                    message_to_send
+                                )
+                                content = f"✅ I've sent your message \"{message_to_send}\" to #{target_channel}!"
+                                logger.info(f"Sent message '{message_to_send}' to specified channel {target_channel} for user {send_request.message.sender.full_name}")
+                            except Exception as e:
+                                content = f"❌ Failed to send message to #{target_channel}: {str(e)}"
+                                logger.error(f"Failed to send message to channel: {e}")
+                        else:
+                            # Get channel suggestion based on message content
+                            channel_suggestion = suggest_target_channel(
+                                send_request.realm,
+                                message_to_send,
+                                send_request.message.sender.email
+                            )
+                            
+                            if channel_suggestion:
+                                # Send the message to the suggested channel
+                                from zerver.actions.message_send import internal_send_stream_message_by_name
+                                try:
+                                    internal_send_stream_message_by_name(
+                                        send_request.realm,
+                                        send_request.message.sender,
+                                        channel_suggestion['channel_name'],
+                                        "general",  # Default topic
+                                        message_to_send
+                                    )
+                                    
+                                    channel_response = f"✅ I've sent your message \"{message_to_send}\" to #{channel_suggestion['channel_name']}!\n\n"
+                                    channel_response += f"This channel has {channel_suggestion['message_count']} related messages and {len(channel_suggestion['participants'])} active participants including: {', '.join(channel_suggestion['participants'][:3])}.\n\n"
+                                    channel_response += f"You can view the channel here: #**{channel_suggestion['channel_name']}**"
+                                    content = channel_response
+                                    logger.info(f"Sent message '{message_to_send}' to channel {channel_suggestion['channel_name']} for user {send_request.message.sender.full_name}")
+                                except Exception as e:
+                                    content = f"❌ Failed to send message to #{channel_suggestion['channel_name']}: {str(e)}"
+                                    logger.error(f"Failed to send message to channel: {e}")
+                            else:
+                                content = f"I couldn't find a suitable channel for your message \"{message_to_send}\". Try being more specific about the topic or create a new channel."
+                    else:
+                        content = "Please specify the message you want to send. For example: 'Send \"I want pho\" to \"test\"'"
+                        
+                elif is_suggestion_request:
+                    # Get recipient suggestions based on message content
+                    suggestions = suggest_message_recipients(
+                        send_request.realm, 
+                        human_message, 
+                        send_request.message.sender.email, 
+                        limit=3
+                    )
+                    
+                    if suggestions:
+                        suggestion_response = "Here are some people who might be interested in your message based on their chat history:\n\n"
+                        for i, suggestion in enumerate(suggestions, 1):
+                            suggestion_response += f"{i}. **{suggestion['user_name']}** - Active in similar topics ({suggestion['message_count']} related messages)\n"
+                            suggestion_response += f"   Recent topics: {', '.join(suggestion['recent_topics'][:2])}...\n"
+                            suggestion_response += f"   Last active: {suggestion['last_active']}\n\n"
+                        
+                        suggestion_response += "You can send them a direct message or mention them in a relevant channel!"
+                        content = suggestion_response
+                        logger.info(f"Provided recipient suggestions for user {send_request.message.sender.full_name}")
+                    else:
+                        content = "I couldn't find specific people to suggest based on your message. Try being more specific about the topic, or use Zulip's search to find relevant conversations."
+                else:
+                    # Search for relevant messages in database, excluding the user's own messages
+                    search_results = search_messages_in_database(send_request.realm, human_message, limit=5, exclude_sender_email=send_request.message.sender.email)
+                    
+                    # Add search results to context if found
+                    if search_results:
+                        search_context = "\n\nRELEVANT MESSAGES FOUND:\n"
+                        for msg in search_results:
+                            search_context += f"- {msg['sender']} in #{msg['stream']} ({msg['date']}): {msg['content'][:200]}...\n"
+                            # Use proper Zulip message link format with stream ID
+                            search_context += f"  Link: [View message](/#narrow/stream/{msg['stream_id']}-{msg['stream']}/near/{msg['message_id']})\n"
+                        context += search_context
+                        
+                        # Create response with multiple relevant messages
+                        if len(search_results) == 1:
+                            ai_response_prefix = f"I found a message from {search_results[0]['sender']} in #{search_results[0]['stream']} on {search_results[0]['date']} that says: \"{search_results[0]['content'][:100]}...\"\n\n"
+                            ai_response_prefix += f"You can view the message here: [View message](/#narrow/stream/{search_results[0]['stream_id']}-{search_results[0]['stream']}/near/{search_results[0]['message_id']})"
+                        else:
+                            ai_response_prefix = f"I found {len(search_results)} relevant messages:\n\n"
+                            for i, msg in enumerate(search_results[:5], 1):  # Show up to 5 messages
+                                ai_response_prefix += f"{i}. **{msg['sender']}** in #{msg['stream']} ({msg['date']}):\n"
+                                ai_response_prefix += f"   \"{msg['content'][:150]}...\"\n"
+                                ai_response_prefix += f"   [View message](/#narrow/stream/{msg['stream_id']}-{msg['stream']}/near/{msg['message_id']})\n\n"
+                        
+                        # Skip AI generation and use direct response with working links
+                        content = ai_response_prefix
+                        logger.info(f"Using direct response with {len(search_results)} messages found...")
+                    else:
+                        # Only use AI if no search results found
+                        context += "\nNo relevant messages found in recent history. Suggest using Zulip's search feature."
+                    
+                    # Generate AI response
+                    logger.info("Generating AI response with database search context...")
+                    ai_response = ai_agent.chat(
+                        message=send_request.message.content,
+                        user=send_request.message.sender,
+                        context=context,
+                        agent_type="welcome_bot",
+                        use_vector_context=False,  # Use database search instead
+                    )
+                    logger.info(f"AI response received: {ai_response[:100]}...")
+                    
+                    # Use AI response if it's reasonable
+                    if ai_response and len(ai_response.strip()) > 10:
+                        content = ai_response
+                        # Log successful AI usage
+                        import logging
+                        logger = logging.getLogger(__name__)
+                        logger.info(f"AI welcome bot used for user {send_request.message.sender.full_name}: {ai_response[:100]}...")
+                    else:
+                        # Log why AI response was not used
+                        import logging
+                        logger = logging.getLogger(__name__)
+                        logger.warning(f"AI response too short or empty: '{ai_response}'")
+                    
+        except (OpenAIConnectionError, OpenAIModelError) as e:
             # Log error but continue with fallback
             import logging
             logger = logging.getLogger(__name__)

@@ -250,8 +250,16 @@ export let send_message = (request = create_message_object()) => {
         drafts.sync_count();
 
         const draft = drafts.draft_model.getDraft(request.draft_id);
-        draft.is_sending_saving = false;
-        drafts.draft_model.editDraft(request.draft_id, draft);
+        if (draft && typeof draft === 'object' && draft !== false && !draft.hasOwnProperty('draft')) {
+            draft.is_sending_saving = false;
+            drafts.draft_model.editDraft(request.draft_id, draft);
+        } else if (draft && draft !== false && typeof draft === 'object' && draft.hasOwnProperty('draft')) {
+            // Skip processing if draft is the wrapper object {"draft": false}
+            // This is normal when no draft exists
+        } else if (draft !== false && draft) {
+            // Only log error if draft exists but is not a proper object
+            blueslip.error('Draft expected to be an object but got:', {draft_id: request.draft_id, draft});
+        }
     }
 
     transmit.send_message(request, success, error);
@@ -393,8 +401,16 @@ function schedule_message_to_custom_date() {
             $("textarea#compose-textarea"),
         );
         const draft = drafts.draft_model.getDraft(draft_id);
-        draft.is_sending_saving = false;
-        drafts.draft_model.editDraft(draft_id, draft);
+        if (draft && typeof draft === 'object' && draft !== false && !draft.hasOwnProperty('draft')) {
+            draft.is_sending_saving = false;
+            drafts.draft_model.editDraft(draft_id, draft);
+        } else if (draft && draft !== false && typeof draft === 'object' && draft.hasOwnProperty('draft')) {
+            // Skip processing if draft is the wrapper object {"draft": false}
+            // This is normal when no draft exists
+        } else if (draft !== false && draft) {
+            // Only log error if draft exists but is not a proper object
+            blueslip.error('Draft expected to be an object but got:', {draft_id, draft});
+        }
     };
 
     channel.post({

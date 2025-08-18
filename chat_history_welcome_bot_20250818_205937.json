@@ -1,0 +1,107 @@
+{
+  "export_timestamp": "2025-08-18T20:59:37.131314",
+  "bot_email": "welcome-bot@zulip.com",
+  "realm": "System bot realm",
+  "message_count": 11,
+  "messages": [
+    {
+      "id": 349,
+      "date": "2025-08-18T20:11:21.923773+00:00",
+      "direction": "user_to_bot",
+      "sender": "user6@zulipdev.com",
+      "sender_name": "aaron",
+      "recipient": "welcome-bot@zulip.com",
+      "content": "hi"
+    },
+    {
+      "id": 352,
+      "date": "2025-08-18T20:12:24.145468+00:00",
+      "direction": "user_to_bot",
+      "sender": "user6@zulipdev.com",
+      "sender_name": "aaron",
+      "recipient": "welcome-bot@zulip.com",
+      "content": "hey"
+    },
+    {
+      "id": 353,
+      "date": "2025-08-18T20:15:25.710917+00:00",
+      "direction": "bot_to_user",
+      "sender": "welcome-bot@zulip.com",
+      "sender_name": "Welcome Bot",
+      "recipient": "user6@zulipdev.com",
+      "content": "Hello aaron! Welcome to Zulip Dev. I'm here to help you get started with our team collaboration platform.\n\nWe're glad you joined us! Before we begin, would you like some general information about how to use Zulip or are there any specific questions you have about our organization?\n\nYou can type `help` at any time for available commands and options."
+    },
+    {
+      "id": 354,
+      "date": "2025-08-18T20:15:42.187225+00:00",
+      "direction": "bot_to_user",
+      "sender": "welcome-bot@zulip.com",
+      "sender_name": "Welcome Bot",
+      "recipient": "user6@zulipdev.com",
+      "content": "Welcome to Zulip Dev, aaron! I'm here to help you get started. You're now part of our community where we discuss everything related to Zulip development.\n\nTo begin with, take a look around the Streams (or Channels) on the left sidebar. You'll see various topics like \"General\", \"Feedback\", and \"Bug Reports\". Feel free to join any conversation that interests you by clicking on it!\n\nIf you need help with anything specific or want to know more about Zulip features, just let me know! What would you like to do first?"
+    },
+    {
+      "id": 365,
+      "date": "2025-08-18T20:45:56.763410+00:00",
+      "direction": "user_to_bot",
+      "sender": "user6@zulipdev.com",
+      "sender_name": "aaron",
+      "recipient": "welcome-bot@zulip.com",
+      "content": "hey"
+    },
+    {
+      "id": 366,
+      "date": "2025-08-18T20:45:59.091603+00:00",
+      "direction": "bot_to_user",
+      "sender": "welcome-bot@zulip.com",
+      "sender_name": "Welcome Bot",
+      "recipient": "user6@zulipdev.com",
+      "content": "Hey Aaron! How's it going?"
+    },
+    {
+      "id": 369,
+      "date": "2025-08-18T20:46:47.452649+00:00",
+      "direction": "bot_to_user",
+      "sender": "welcome-bot@zulip.com",
+      "sender_name": "Welcome Bot",
+      "recipient": "user6@zulipdev.com",
+      "content": "Hi Aaron! If you're looking for restaurant suggestions, it would help to know what type of cuisine you're in the mood for or if you have a particular area in mind. Let me know, and I can provide some recommendations!"
+    },
+    {
+      "id": 370,
+      "date": "2025-08-18T20:53:01.177694+00:00",
+      "direction": "user_to_bot",
+      "sender": "user6@zulipdev.com",
+      "sender_name": "aaron",
+      "recipient": "welcome-bot@zulip.com",
+      "content": "anyone talking about Mcdonalds?"
+    },
+    {
+      "id": 371,
+      "date": "2025-08-18T20:53:01.641257+00:00",
+      "direction": "bot_to_user",
+      "sender": "welcome-bot@zulip.com",
+      "sender_name": "Welcome Bot",
+      "recipient": "user6@zulipdev.com",
+      "content": "You can chat with me as much as you like! To get help, try one of the following messages: `apps`, `profile`, `theme`, `channels`, `topics`, `message formatting`, `keyboard shortcuts`, `help`."
+    },
+    {
+      "id": 372,
+      "date": "2025-08-18T20:53:52.903934+00:00",
+      "direction": "user_to_bot",
+      "sender": "user6@zulipdev.com",
+      "sender_name": "aaron",
+      "recipient": "welcome-bot@zulip.com",
+      "content": "Can you find the message I want in this group chat?"
+    },
+    {
+      "id": 373,
+      "date": "2025-08-18T20:55:08.816633+00:00",
+      "direction": "user_to_bot",
+      "sender": "user6@zulipdev.com",
+      "sender_name": "aaron",
+      "recipient": "welcome-bot@zulip.com",
+      "content": "create chat \"yapping\" for me"
+    }
+  ]
+}

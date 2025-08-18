@@ -94,10 +94,74 @@ def create_channel(realm: Realm, user: UserProfile, channel_name: str, topic_key
 
 def detect_chat_creation_request(message: str) -> Tuple[bool, Optional[str]]:
     """
-    Detects if a message is requesting to create a chat or channel
+    Use AI to detect if a message is requesting to create a chat or channel
     Returns a tuple of (is_creation_request, group_name or None)
     """
-    # Common patterns for chat creation requests
+    try:
+        from zerver.lib.ai_agents_openai import ZulipAIAgent
+        from zerver.models import Realm
+        
+        # Get a realm for AI agent - we need to pass it from the caller
+        # For now, use a fallback but this should be improved
+        realm = Realm.objects.first()  # Get any available realm
+        
+        ai_agent = ZulipAIAgent(realm)
+        if not ai_agent.is_healthy():
+            return _fallback_pattern_detection(message)
+        
+        prompt = f"""
+        Analyze this message to determine if the user wants to create a new chat channel or group.
+        Return a JSON object with:
+        - is_creation_request: true if they want to create something
+        - channel_name: the name they want to use (if specified)
+        
+        User message: "{message}"
+        
+        Examples:
+        - "create channel python-help" → {{"is_creation_request": true, "channel_name": "python-help"}}
+        - "make a new group for design" → {{"is_creation_request": true, "channel_name": "design"}}
+        - "start coding channel" → {{"is_creation_request": true, "channel_name": "coding"}}
+        - "how are you?" → {{"is_creation_request": false}}
+        
+        Return only valid JSON, no other text.
+        """
+        
+        # Create a dummy user for AI agent (we need to pass a user)
+        from zerver.models import UserProfile
+        dummy_user = UserProfile.objects.filter(realm=realm, is_active=True).first()
+        if not dummy_user:
+            return _fallback_pattern_detection(message)
+            
+        response = ai_agent.chat(prompt, dummy_user)
+        if response:
+            import json
+            try:
+                result = json.loads(response.strip())
+                is_creation = result.get('is_creation_request', False)
+                channel_name = result.get('channel_name')
+                return is_creation, channel_name
+            except json.JSONDecodeError:
+                # Try to extract JSON from response
+                import re
+                json_match = re.search(r'\{.*\}', response, re.DOTALL)
+                if json_match:
+                    result = json.loads(json_match.group())
+                    is_creation = result.get('is_creation_request', False)
+                    channel_name = result.get('channel_name')
+                    return is_creation, channel_name
+        
+        return _fallback_pattern_detection(message)
+        
+    except Exception as e:
+        logger = logging.getLogger(__name__)
+        logger.warning(f"AI chat creation detection failed: {e}")
+        return _fallback_pattern_detection(message)
+
+
+def _fallback_pattern_detection(message: str) -> Tuple[bool, Optional[str]]:
+    """
+    Fallback pattern-based detection for chat creation requests
+    """
     patterns = [
         r'create (?:a |)(?:new |)(?:chat|group|channel) ["\']?([^"\']+)["\']?',
         r'make (?:a |)(?:new |)(?:chat|group|channel) ["\']?([^"\']+)["\']?',

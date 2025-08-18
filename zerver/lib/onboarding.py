@@ -39,40 +39,90 @@ def extract_search_terms_with_ai(query: str, realm: Realm) -> List[str]:
         
         Your task:
         1. Identify what category/topic the user is asking about (e.g., food, technology, work, entertainment, etc.)
-        2. Generate 5-10 relevant search terms that would help find related messages
-        3. Include synonyms, related words, and common variations
-        4. Return only the search terms as a comma-separated list, no explanations
         
-        Examples:
-        - "Any restaurant recommendations?" → restaurant, food, recommend, suggest, place, eat, dining, cuisine, meal, good
-        - "What movies should I watch?" → movie, film, watch, recommend, cinema, entertainment, show, series, streaming, good
-        - "Need help with coding" → code, programming, development, bug, error, help, software, debug, solution, fix
-        
-        Query: "{query}"
-        Search terms:
+        Return only the keywords as a comma-separated list, no other text.
         """
         
-        response = ai_agent.chat(
-            message=prompt,
-            user=None,
-            context="",
-            agent_type="search_assistant",
-            use_vector_context=False
-        )
-        
-        if response:
-            # Extract terms from AI response
-            terms = [term.strip().lower() for term in response.split(',')]
-            return [term for term in terms if len(term) > 2][:10]  # Limit to 10 terms
+        # Create a dummy user for AI agent (we need to pass a user)
+        from zerver.models import UserProfile
+        dummy_user = UserProfile.objects.filter(realm=realm, is_active=True).first()
+        if not dummy_user:
+            return []
             
+        response = ai_agent.chat(prompt, dummy_user)
+        if response:
+            # Parse the response to extract keywords
+            keywords = [term.strip() for term in response.split(',') if term.strip()]
+            return keywords[:5]  # Limit to 5 keywords
+        
+        return []
+        
     except Exception as e:
         import logging
         logger = logging.getLogger(__name__)
         logger.warning(f"AI search term extraction failed: {e}")
-    
-    # Fallback to basic extraction
-    words = query.lower().replace("?", "").replace("!", "").split()
-    return [word for word in words if len(word) > 2]
+        
+        # Fallback to simple word extraction
+        words = message.lower().split()
+        return [word for word in words if len(word) > 3 and word.isalpha()][:5]
+
+
+def analyze_user_intent_with_ai(message: str, realm: Realm) -> Dict[str, Any]:
+    """
+    Use AI to analyze user intent and extract relevant information from their message.
+    """
+    try:
+        from zerver.lib.ai_agents_openai import ZulipAIAgent
+        
+        ai_agent = ZulipAIAgent(realm)
+        if not ai_agent.is_healthy():
+            return {}
+        
+        prompt = f"""
+        Analyze this user message and determine their intent. Return a JSON object with these fields:
+
+        - is_channel_send_request: true if user wants to send a message to a channel or person
+        - is_suggestion_request: true if user wants suggestions for who to contact about a topic
+        - message_to_send: the actual message content they want to send (if any)
+        - target_channel: the channel name they want to send to (if specified)
+        - target_user: the username they want to send to (if specified, without @)
+
+        User message: "{message}"
+
+        Examples:
+        - "send 'hello' to #general" → {{"is_channel_send_request": true, "message_to_send": "hello", "target_channel": "general"}}
+        - "send 'hi' to @john" → {{"is_channel_send_request": true, "message_to_send": "hi", "target_user": "john"}}
+        - "who knows about python?" → {{"is_suggestion_request": true}}
+        - "who can I send this to?" → {{"is_suggestion_request": true}}
+
+        Return only valid JSON, no other text.
+        """
+        
+        # Create a dummy user for AI agent (we need to pass a user)
+        from zerver.models import UserProfile
+        dummy_user = UserProfile.objects.filter(realm=realm, is_active=True).first()
+        if not dummy_user:
+            return {}
+            
+        response = ai_agent.chat(prompt, dummy_user)
+        if response:
+            import json
+            try:
+                return json.loads(response.strip())
+            except json.JSONDecodeError:
+                # Try to extract JSON from response if it's wrapped in other text
+                import re
+                json_match = re.search(r'\{.*\}', response, re.DOTALL)
+                if json_match:
+                    return json.loads(json_match.group())
+        
+        return {}
+        
+    except Exception as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.warning(f"AI intent analysis failed: {e}")
+        return {}
 
 
 def suggest_target_channel(realm: Realm, message_content: str, sender_email: str) -> Dict[str, Any]:
@@ -483,6 +533,7 @@ def send_welcome_bot_response(send_request: SendMessageRequest) -> None:
     
     # Import our chat creation functions
     from zerver.lib.chat_creation import detect_chat_creation_request, create_channel, create_chat_group
+    from zerver.actions.message_send import internal_send_stream_message_by_name, internal_send_private_message
     
     # Check for chat creation requests first
     is_creation_request, chat_name = detect_chat_creation_request(human_message)
@@ -590,60 +641,16 @@ def send_welcome_bot_response(send_request: SendMessageRequest) -> None:
                 ai_agent.context_limit = getattr(settings, "WELCOME_BOT_VECTOR_CONTEXT_LIMIT", 3)
                 ai_agent.context_threshold = getattr(settings, "WELCOME_BOT_VECTOR_THRESHOLD", 0.5)
                 
-                # Check if this is a channel sending request
-                is_channel_send_request = any(keyword in human_message.lower() for keyword in [
-                    "send to channel", "post to channel", "send message to", "post in channel",
-                    "suggest channel for", "which channel should i send", "send this to", "send to"
-                ])
+                # Use AI to detect user intent instead of keyword matching
+                intent_analysis = analyze_user_intent_with_ai(human_message, send_request.realm)
                 
-                # Also check for pattern like 'send "message" to channel about topic' or 'send "message" to "channel"'
-                if not is_channel_send_request and "send" in human_message.lower():
-                    is_channel_send_request = (any(word in human_message.lower() for word in ["channel", "stream"]) or 
-                                             ('"' in human_message and " to " in human_message.lower()))
-                
-                # Check if this is a recipient suggestion request
-                is_suggestion_request = any(keyword in human_message.lower() for keyword in [
-                    "who should i send", "who to send", "suggest recipient", "recommend recipient", 
-                    "who would be interested", "who knows about", "who can help with", "who can i send"
-                ])
-                
-                # Also check if user is asking about people in context of topics
-                if not is_suggestion_request:
-                    is_suggestion_request = ("who" in human_message.lower() and 
-                                           any(word in human_message.lower() for word in ["about", "help", "interested", "knows", "send", "can"]))
+                is_channel_send_request = intent_analysis.get('is_channel_send_request', False)
+                is_suggestion_request = intent_analysis.get('is_suggestion_request', False)
+                message_to_send = intent_analysis.get('message_to_send')
+                target_channel = intent_analysis.get('target_channel')
+                target_user = intent_analysis.get('target_user')
                 
                 if is_channel_send_request and not is_suggestion_request:
-                    # Extract the message content to send and target channel/user
-                    message_to_send = None
-                    target_channel = None
-                    target_user = None
-                    
-                    # Look for quoted message content
-                    if '"' in human_message:
-                        start = human_message.find('"')
-                        end = human_message.find('"', start + 1)
-                        if end != -1:
-                            message_to_send = human_message[start+1:end]
-                            
-                            # Look for target after the quoted message
-                            remaining = human_message[end+1:].strip()
-                            
-                            # Check for @mention (direct message to user)
-                            if 'to @' in remaining:
-                                mention_start = remaining.find('@') + 1
-                                # Extract username after @
-                                mention_end = len(remaining)
-                                for i, char in enumerate(remaining[mention_start:], mention_start):
-                                    if char in [' ', '\n', '\t']:
-                                        mention_end = i
-                                        break
-                                target_user = remaining[mention_start:mention_end]
-                            elif 'to "' in remaining:
-                                # Extract quoted channel name
-                                channel_start = remaining.find('"')
-                                channel_end = remaining.find('"', channel_start + 1)
-                                if channel_end != -1:
-                                    target_channel = remaining[channel_start+1:channel_end]
                     
                     if message_to_send:
                         # Check if sending to a specific user via @mention
@@ -695,7 +702,6 @@ def send_welcome_bot_response(send_request: SendMessageRequest) -> None:
                             
                             if channel_suggestion:
                                 # Send the message to the suggested channel
-                                from zerver.actions.message_send import internal_send_stream_message_by_name
                                 try:
                                     internal_send_stream_message_by_name(
                                         send_request.realm,

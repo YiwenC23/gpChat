@@ -98,6 +98,11 @@ const config = (
                     loader: "expose-loader",
                     options: {exposes: ["$", "jQuery"]},
                 },
+                {
+                    test: path.resolve(import.meta.dirname, "src/blueslip.ts"),
+                    loader: "expose-loader",
+                    options: {exposes: "blueslip"},
+                },
                 // Generate webfont
                 {
                     test: /\.font\.cjs$/,

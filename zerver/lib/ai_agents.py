@@ -1,4 +1,4 @@
-﻿"""
+"""
 Zulip AI Agents Integration Library
 Provides interface between Zulip and local Ollama AI models with vector database integration
 """
@@ -12,8 +12,14 @@ from django.conf import settings
 import textwrap
 
 from zerver.models import Realm, UserProfile
-from vector_db.core.vector_store import VectorStore
-from vector_db.models.document import Document
+from zproject.vector_db_mock import VectorStore
+
+class Document:
+    """Mock Document class for vector database"""
+    def __init__(self, content, embedding, metadata):
+        self.content = content
+        self.embedding = embedding
+        self.metadata = metadata
 
 
 logger = logging.getLogger(__name__)

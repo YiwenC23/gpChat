@@ -1,0 +1,144 @@
+{
+  "export_timestamp": "2025-08-18T21:19:11.570991",
+  "collections": {
+    "zulip_messages": [
+      {
+        "content": "hi",
+        "metadata": {
+          "sender": "user6@zulipdev.com",
+          "user_name": "aaron",
+          "timestamp": "1755547881.0",
+          "is_bot": false,
+          "message_id": "349",
+          "conversation_id": "conv_user6@zulipdev.com_1755547881"
+        },
+        "embedding_dimensions": 1536
+      },
+      {
+        "content": "hey",
+        "metadata": {
+          "sender": "user6@zulipdev.com",
+          "user_name": "aaron",
+          "timestamp": "1755547944.0",
+          "is_bot": false,
+          "message_id": "352",
+          "conversation_id": "conv_user6@zulipdev.com_1755547944"
+        },
+        "embedding_dimensions": 1536
+      },
+      {
+        "content": "hey",
+        "metadata": {
+          "sender": "user6@zulipdev.com",
+          "user_name": "aaron",
+          "timestamp": "1755549956.0",
+          "is_bot": false,
+          "message_id": "365",
+          "conversation_id": "conv_user6@zulipdev.com_1755549956"
+        },
+        "embedding_dimensions": 1536
+      },
+      {
+        "content": "anyone talking about Mcdonalds?",
+        "metadata": {
+          "sender": "user6@zulipdev.com",
+          "user_name": "aaron",
+          "timestamp": "1755550381.0",
+          "is_bot": false,
+          "message_id": "370",
+          "conversation_id": "conv_user6@zulipdev.com_1755550381"
+        },
+        "embedding_dimensions": 1536
+      },
+      {
+        "content": "Can you find the message I want in this group chat?",
+        "metadata": {
+          "sender": "user6@zulipdev.com",
+          "user_name": "aaron",
+          "timestamp": "1755550432.0",
+          "is_bot": false,
+          "message_id": "372",
+          "conversation_id": "conv_user6@zulipdev.com_1755550432"
+        },
+        "embedding_dimensions": 1536
+      },
+      {
+        "content": "create chat \"yapping\" for me",
+        "metadata": {
+          "sender": "user6@zulipdev.com",
+          "user_name": "aaron",
+          "timestamp": "1755550508.0",
+          "is_bot": false,
+          "message_id": "373",
+          "conversation_id": "conv_user6@zulipdev.com_1755550508"
+        },
+        "embedding_dimensions": 1536
+      },
+      {
+        "content": "Hello aaron! Welcome to Zulip Dev. I'm here to help you get started with our team collaboration platform.\n\nWe're glad you joined us! Before we begin, would you like some general information about how to use Zulip or are there any specific questions you have about our organization?\n\nYou can type `help` at any time for available commands and options.",
+        "metadata": {
+          "sender": "welcome-bot@zulip.com",
+          "user_name": "Welcome Bot",
+          "timestamp": "1755548125.0",
+          "is_bot": true,
+          "bot_response": true,
+          "message_id": "353",
+          "conversation_id": "conv_user6@zulipdev.com_1755550508"
+        },
+        "embedding_dimensions": 1536
+      },
+      {
+        "content": "Welcome to Zulip Dev, aaron! I'm here to help you get started. You're now part of our community where we discuss everything related to Zulip development.\n\nTo begin with, take a look around the Streams (or Channels) on the left sidebar. You'll see various topics like \"General\", \"Feedback\", and \"Bug Reports\". Feel free to join any conversation that interests you by clicking on it!\n\nIf you need help with anything specific or want to know more about Zulip features, just let me know! What would you like to do first?",
+        "metadata": {
+          "sender": "welcome-bot@zulip.com",
+          "user_name": "Welcome Bot",
+          "timestamp": "1755548142.0",
+          "is_bot": true,
+          "bot_response": true,
+          "message_id": "354",
+          "conversation_id": "conv_user6@zulipdev.com_1755550508"
+        },
+        "embedding_dimensions": 1536
+      },
+      {
+        "content": "Hey Aaron! How's it going?",
+        "metadata": {
+          "sender": "welcome-bot@zulip.com",
+          "user_name": "Welcome Bot",
+          "timestamp": "1755549959.0",
+          "is_bot": true,
+          "bot_response": true,
+          "message_id": "366",
+          "conversation_id": "conv_user6@zulipdev.com_1755550508"
+        },
+        "embedding_dimensions": 1536
+      },
+      {
+        "content": "Hi Aaron! If you're looking for restaurant suggestions, it would help to know what type of cuisine you're in the mood for or if you have a particular area in mind. Let me know, and I can provide some recommendations!",
+        "metadata": {
+          "sender": "welcome-bot@zulip.com",
+          "user_name": "Welcome Bot",
+          "timestamp": "1755550007.0",
+          "is_bot": true,
+          "bot_response": true,
+          "message_id": "369",
+          "conversation_id": "conv_user6@zulipdev.com_1755550508"
+        },
+        "embedding_dimensions": 1536
+      },
+      {
+        "content": "You can chat with me as much as you like! To get help, try one of the following messages: `apps`, `profile`, `theme`, `channels`, `topics`, `message formatting`, `keyboard shortcuts`, `help`.",
+        "metadata": {
+          "sender": "welcome-bot@zulip.com",
+          "user_name": "Welcome Bot",
+          "timestamp": "1755550381.0",
+          "is_bot": true,
+          "bot_response": true,
+          "message_id": "371",
+          "conversation_id": "conv_user6@zulipdev.com_1755550508"
+        },
+        "embedding_dimensions": 1536
+      }
+    ]
+  }
+}

@@ -1,5 +1,8 @@
-﻿import os
+import os
 import pwd
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from scripts.lib.zulip_tools import deport
 from zproject.settings_types import SCIMConfigDict
@@ -230,6 +233,25 @@ MAX_WEB_DATA_IMPORT_SIZE_MB = 1024
 
 # AI Agents Configuration
 AI_AGENTS_ENABLED = True
-OLLAMA_BASE_URL = "http://localhost:11434"
-AI_AGENTS_DEFAULT_MODEL = "llama3.1:8b"
-AI_AGENTS_EMBEDDING_MODEL = "nomic-embed-text:v1.5"
+
+# OpenAI Configuration
+# IMPORTANT: Replace this with your actual OpenAI API key
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+OPENAI_BASE_URL = "https://api.openai.com/v1"
+
+# Enable AI agents system
+AI_AGENTS_ENABLED = True
+AI_AGENTS_DEFAULT_MODEL = "gpt-4o-mini"
+AI_AGENTS_EMBEDDING_MODEL = "text-embedding-ada-002"
+AI_AGENTS_CONTEXT_LIMIT = 5
+AI_AGENTS_CONTEXT_THRESHOLD = 0.6
+
+# Welcome bot RAG configuration
+WELCOME_BOT_VECTOR_CONTEXT_LIMIT = 5  # Number of relevant conversations to retrieve
+WELCOME_BOT_VECTOR_THRESHOLD = 0.5    # Similarity threshold for relevance
+WELCOME_BOT_USE_VECTOR_DB = True      # Enable RAG for welcome bot
+
+# Ollama Configuration (commented out but kept for reference)
+# OLLAMA_BASE_URL = "http://localhost:11434"
+# AI_AGENTS_DEFAULT_MODEL = "llama3.1:8b"
+# AI_AGENTS_EMBEDDING_MODEL = "nomic-embed-text:v1.5"

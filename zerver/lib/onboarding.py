@@ -84,16 +84,22 @@ def analyze_user_intent_with_ai(message: str, realm: Realm) -> Dict[str, Any]:
         - is_channel_send_request: true if user wants to send a message to a channel or person
         - is_suggestion_request: true if user wants suggestions for who to contact about a topic
         - message_to_send: the actual message content they want to send (if any)
-        - target_channel: the channel name they want to send to (if specified)
+        - target_channel: the channel name they want to send to (if specified explicitly like #general)
         - target_user: the username they want to send to (if specified, without @)
+        - topic_search: the topic/subject they want to find discussions about (for smart channel finding)
+        - needs_channel_suggestion: true if they want to send to a channel discussing a topic but didn't specify the exact channel name
 
         User message: "{message}"
 
         Examples:
         - "send 'hello' to #general" → {{"is_channel_send_request": true, "message_to_send": "hello", "target_channel": "general"}}
         - "send 'hi' to @john" → {{"is_channel_send_request": true, "message_to_send": "hi", "target_user": "john"}}
+        - "send 'I want pizza' to the channel discussing dinner" → {{"is_channel_send_request": true, "message_to_send": "I want pizza", "topic_search": "dinner", "needs_channel_suggestion": true}}
+        - "send 'need help' to people talking about coding" → {{"is_channel_send_request": true, "message_to_send": "need help", "topic_search": "coding", "needs_channel_suggestion": true}}
         - "who knows about python?" → {{"is_suggestion_request": true}}
         - "who can I send this to?" → {{"is_suggestion_request": true}}
+        - "any restaurant recommendations?" → {{"is_suggestion_request": true}}
+        - "anyone talking about dinner?" → {{"is_suggestion_request": true}}
 
         Return only valid JSON, no other text.
         """
@@ -148,7 +154,13 @@ def suggest_target_channel(realm: Realm, message_content: str, sender_email: str
         ).filter(q_objects).exclude(
             sender__email=sender_email  # Exclude the current user
         ).exclude(
-            sender__email__endswith='welcome-bot@zulip.com'  # Exclude bots
+            sender__email__endswith='welcome-bot@zulip.com'  # Exclude welcome bots
+        ).exclude(
+            sender__email__endswith='notification-bot@zulip.com'  # Exclude notification bots
+        ).exclude(
+            content__icontains='has been archived'  # Exclude archive notifications
+        ).exclude(
+            content__icontains='Channel #**'  # Exclude channel system messages
         ).select_related('sender', 'recipient').order_by('-date_sent')[:50]
         
         # Count activity by channel to find most relevant
@@ -157,27 +169,47 @@ def suggest_target_channel(realm: Realm, message_content: str, sender_email: str
             try:
                 stream = Stream.objects.get(recipient=msg.recipient)
                 stream_key = stream.name
+                # Skip archived channels
+                if stream.deactivated:
+                    continue
+                    
                 if stream_key not in channel_activity:
                     channel_activity[stream_key] = {
                         'stream': stream,
                         'message_count': 0,
                         'recent_messages': [],
                         'last_message_date': msg.date_sent,
-                        'participants': set()
+                        'participants': set(),
+                        'user_message_count': 0  # Track actual user messages vs system messages
                     }
                 channel_activity[stream_key]['message_count'] += 1
                 channel_activity[stream_key]['participants'].add(msg.sender.full_name)
+                
+                # Only count as user message if it's not a system/bot message
+                if not msg.sender.is_bot and not msg.content.startswith('Channel #'):
+                    channel_activity[stream_key]['user_message_count'] += 1
+                    
                 if len(channel_activity[stream_key]['recent_messages']) < 3:
                     channel_activity[stream_key]['recent_messages'].append(msg.content[:100])
             except Stream.DoesNotExist:
                 continue
         
-        # Find the most active channel for this topic
+        # Find the most active channel for this topic, prioritizing user messages
         if channel_activity:
-            best_channel = max(
-                channel_activity.values(), 
-                key=lambda x: (x['message_count'], x['last_message_date'])
-            )
+            # Filter to only channels with actual user discussions
+            active_channels = {k: v for k, v in channel_activity.items() if v['user_message_count'] > 0}
+            
+            if active_channels:
+                best_channel = max(
+                    active_channels.values(), 
+                    key=lambda x: (x['user_message_count'], x['message_count'], x['last_message_date'])
+                )
+            else:
+                # Fallback to any channel if no user messages found
+                best_channel = max(
+                    channel_activity.values(), 
+                    key=lambda x: (x['message_count'], x['last_message_date'])
+                )
             
             return {
                 'channel_name': best_channel['stream'].name,
@@ -649,6 +681,8 @@ def send_welcome_bot_response(send_request: SendMessageRequest) -> None:
                 message_to_send = intent_analysis.get('message_to_send')
                 target_channel = intent_analysis.get('target_channel')
                 target_user = intent_analysis.get('target_user')
+                topic_search = intent_analysis.get('topic_search')
+                needs_channel_suggestion = intent_analysis.get('needs_channel_suggestion', False)
                 
                 if is_channel_send_request and not is_suggestion_request:
                     
@@ -692,6 +726,35 @@ def send_welcome_bot_response(send_request: SendMessageRequest) -> None:
                             except Exception as e:
                                 content = f"❌ Failed to send message to #{target_channel}: {str(e)}"
                                 logger.error(f"Failed to send message to channel: {e}")
+                        elif needs_channel_suggestion and topic_search:
+                            # Find channel where the topic is being discussed
+                            channel_suggestion = suggest_target_channel(
+                                send_request.realm,
+                                topic_search,  # Use the topic they want to find discussions about
+                                send_request.message.sender.email
+                            )
+                            
+                            if channel_suggestion:
+                                # Send the message to the channel discussing that topic
+                                try:
+                                    internal_send_stream_message_by_name(
+                                        send_request.realm,
+                                        send_request.message.sender,
+                                        channel_suggestion['channel_name'],
+                                        "general",  # Default topic
+                                        message_to_send
+                                    )
+                                    
+                                    channel_response = f"✅ I've sent your message \"{message_to_send}\" to #{channel_suggestion['channel_name']}!\n\n"
+                                    channel_response += f"This channel has {channel_suggestion['message_count']} related messages about {topic_search} and {len(channel_suggestion['participants'])} active participants including: {', '.join(channel_suggestion['participants'])}.\n"
+                                    channel_response += f"You can view the channel here: #{channel_suggestion['channel_name']}"
+                                    content = channel_response
+                                    logger.info(f"Sent message '{message_to_send}' to channel {channel_suggestion['channel_name']} discussing {topic_search} for user {send_request.message.sender.full_name}")
+                                except Exception as e:
+                                    content = f"❌ Failed to send message to #{channel_suggestion['channel_name']}: {str(e)}"
+                                    logger.error(f"Failed to send message to channel: {e}")
+                            else:
+                                content = f"I couldn't find a channel where people are discussing {topic_search}. Try being more specific or create a new channel for this topic."
                         else:
                             # Get channel suggestion based on message content
                             channel_suggestion = suggest_target_channel(
@@ -712,8 +775,8 @@ def send_welcome_bot_response(send_request: SendMessageRequest) -> None:
                                     )
                                     
                                     channel_response = f"✅ I've sent your message \"{message_to_send}\" to #{channel_suggestion['channel_name']}!\n\n"
-                                    channel_response += f"This channel has {channel_suggestion['message_count']} related messages and {len(channel_suggestion['participants'])} active participants including: {', '.join(channel_suggestion['participants'][:3])}.\n\n"
-                                    channel_response += f"You can view the channel here: #**{channel_suggestion['channel_name']}**"
+                                    channel_response += f"This channel has {channel_suggestion['message_count']} related messages and {len(channel_suggestion['participants'])} active participants including: {', '.join(channel_suggestion['participants'])}.\n"
+                                    channel_response += f"You can view the channel here: #{channel_suggestion['channel_name']}"
                                     content = channel_response
                                     logger.info(f"Sent message '{message_to_send}' to channel {channel_suggestion['channel_name']} for user {send_request.message.sender.full_name}")
                                 except Exception as e:
@@ -725,28 +788,7 @@ def send_welcome_bot_response(send_request: SendMessageRequest) -> None:
                         content = "Please specify the message you want to send. For example: 'Send \"I want pho\" to \"test\"'"
                         
                 elif is_suggestion_request:
-                    # Get recipient suggestions based on message content
-                    suggestions = suggest_message_recipients(
-                        send_request.realm, 
-                        human_message, 
-                        send_request.message.sender.email, 
-                        limit=3
-                    )
-                    
-                    if suggestions:
-                        suggestion_response = "Here are some people who might be interested in your message based on their chat history:\n\n"
-                        for i, suggestion in enumerate(suggestions, 1):
-                            suggestion_response += f"{i}. **{suggestion['user_name']}** - Active in similar topics ({suggestion['message_count']} related messages)\n"
-                            suggestion_response += f"   Recent topics: {', '.join(suggestion['recent_topics'][:2])}...\n"
-                            suggestion_response += f"   Last active: {suggestion['last_active']}\n\n"
-                        
-                        suggestion_response += "You can send them a direct message or mention them in a relevant channel!"
-                        content = suggestion_response
-                        logger.info(f"Provided recipient suggestions for user {send_request.message.sender.full_name}")
-                    else:
-                        content = "I couldn't find specific people to suggest based on your message. Try being more specific about the topic, or use Zulip's search to find relevant conversations."
-                else:
-                    # Search for relevant messages in database, excluding the user's own messages
+                    # Always search for relevant messages instead of just suggesting users
                     search_results = search_messages_in_database(send_request.realm, human_message, limit=5, exclude_sender_email=send_request.message.sender.email)
                     
                     # Add search results to context if found
@@ -769,13 +811,57 @@ def send_welcome_bot_response(send_request: SendMessageRequest) -> None:
                                 ai_response_prefix += f"   \"{msg['content'][:150]}...\"\n"
                                 ai_response_prefix += f"   [View message](/#narrow/stream/{msg['stream_id']}-{msg['stream']}/near/{msg['message_id']})\n\n"
                         
-                        # Skip AI generation and use direct response with working links
-                        content = ai_response_prefix
-                        logger.info(f"Using direct response with {len(search_results)} messages found...")
+                        # Process the message content through GPT for a natural response
+                        search_context = f"FOUND MESSAGES:\n{ai_response_prefix}\n\nUser asked: {human_message}"
+                        
+                        logger.info("Processing found messages through GPT for natural response...")
+                        ai_response = ai_agent.chat(
+                            message=f"Based on the search results above, provide a helpful response to the user's question: {human_message}",
+                            user=send_request.message.sender,
+                            context=search_context,
+                            agent_type="welcome_bot",
+                            use_vector_context=False,
+                        )
+                        
+                        # Use AI response if available, otherwise fallback to direct content
+                        if ai_response and len(ai_response.strip()) > 10:
+                            content = ai_response
+                            logger.info(f"Using GPT-processed response with {len(search_results)} messages")
+                        else:
+                            content = ai_response_prefix
+                            logger.info(f"Fallback to direct response with {len(search_results)} messages")
+                        
+                        internal_send_private_message(
+                            welcome_bot,
+                            human_user,
+                            content,
+                        )
+                        return
                     else:
-                        # Only use AI if no search results found
-                        context += "\nNo relevant messages found in recent history. Suggest using Zulip's search feature."
-                    
+                        # If no search results found, process through GPT for helpful response
+                        logger.info("No search results found, processing through GPT...")
+                        ai_response = ai_agent.chat(
+                            message=f"The user asked: {human_message}. No relevant messages were found in chat history. Provide a helpful response suggesting alternatives.",
+                            user=send_request.message.sender,
+                            context="No relevant messages found in recent chat history.",
+                            agent_type="welcome_bot",
+                            use_vector_context=False,
+                        )
+                        
+                        # Use AI response if available, otherwise fallback
+                        if ai_response and len(ai_response.strip()) > 10:
+                            content = ai_response
+                            logger.info("Using GPT-processed response for no results case")
+                        else:
+                            content = "I couldn't find any relevant messages about that topic in recent chat history. Try using Zulip's search feature or ask in a relevant channel!"
+                            logger.info("Fallback response for no results case")
+                        
+                        internal_send_private_message(
+                            welcome_bot,
+                            human_user,
+                            content,
+                        )
+                        return               
                     # Generate AI response
                     logger.info("Generating AI response with database search context...")
                     ai_response = ai_agent.chat(
@@ -799,6 +885,25 @@ def send_welcome_bot_response(send_request: SendMessageRequest) -> None:
                         import logging
                         logger = logging.getLogger(__name__)
                         logger.warning(f"AI response too short or empty: '{ai_response}'")
+                else:
+                    # Search for relevant messages in database, excluding the user's own messages
+                    search_results = search_messages_in_database(send_request.realm, human_message, limit=5, exclude_sender_email=send_request.message.sender.email)
+                    
+                    # Return actual messages with clickable links
+                    if search_results:
+                        if len(search_results) == 1:
+                            content = f"I found a message from {search_results[0]['sender']} in #{search_results[0]['stream']} on {search_results[0]['date']} that says: \"{search_results[0]['content'][:100]}...\"\n\n"
+                            content += f"You can view the message here: [View message](/#narrow/stream/{search_results[0]['stream_id']}-{search_results[0]['stream']}/near/{search_results[0]['message_id']})"
+                        else:
+                            content = f"I found {len(search_results)} relevant messages:\n\n"
+                            for i, msg in enumerate(search_results[:5], 1):  # Show up to 5 messages
+                                content += f"{i}. **{msg['sender']}** in #{msg['stream']} ({msg['date']}):\n"
+                                content += f"   \"{msg['content'][:150]}...\"\n"
+                                content += f"   [View message](/#narrow/stream/{msg['stream_id']}-{msg['stream']}/near/{msg['message_id']})\n\n"
+                        
+                        logger.info(f"Using direct response with {len(search_results)} messages found...")
+                    else:
+                        content = "I couldn't find any relevant messages about that topic in recent chat history. Try using Zulip's search feature or ask in a relevant channel!"
                     
         except (OpenAIConnectionError, OpenAIModelError) as e:
             # Log error but continue with fallback
